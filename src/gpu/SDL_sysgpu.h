@@ -18,7 +18,7 @@
      misrepresented as being the original software.
   3. This notice may not be removed or altered from any source distribution.
 */
-#include "SDL_internal.h"
+#include "../SDL_internal.h"
 #include "../video/SDL_sysvideo.h"
 
 #ifndef SDL_GPU_DRIVER_H
@@ -785,6 +785,7 @@ extern SDL_GPUBootstrap VulkanDriver;
 extern SDL_GPUBootstrap D3D11Driver;
 extern SDL_GPUBootstrap D3D12Driver;
 extern SDL_GPUBootstrap MetalDriver;
+extern SDL_GPUBootstrap WebGPUDriver;
 extern SDL_GPUBootstrap PS5Driver;
 
 #ifdef __cplusplus

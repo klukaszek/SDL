@@ -30,6 +30,7 @@
 #ifndef SDL_gpu_h_
 #define SDL_gpu_h_
 
+#include <SDL3/SDL_gpu.h>
 #include <SDL3/SDL_stdinc.h>
 #include <SDL3/SDL_pixels.h>
 #include <SDL3/SDL_properties.h>
@@ -499,7 +500,8 @@ typedef enum SDL_GPUDriver
     SDL_GPU_DRIVER_VULKAN,
     SDL_GPU_DRIVER_D3D11,
     SDL_GPU_DRIVER_D3D12,
-    SDL_GPU_DRIVER_METAL
+    SDL_GPU_DRIVER_METAL,
+    SDL_GPU_DRIVER_WEBGPU,
 } SDL_GPUDriver;
 
 /* Structures */
