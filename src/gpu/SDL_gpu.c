@@ -427,6 +427,7 @@ SDL_GPUDevice *SDL_CreateGPUDevice(
     SDL_SetStringProperty(props, SDL_PROP_GPU_DEVICE_CREATE_NAME_STRING, name);
     result = SDL_CreateGPUDeviceWithProperties(props);
     SDL_DestroyProperties(props);
+    SDL_Log("SDL_CreateGPUDevice: %s", result ? "success" : "failure");
     return result;
 }
 
@@ -485,13 +486,11 @@ SDL_GPUDevice *SDL_CreateGPUDeviceWithProperties(SDL_PropertiesID props)
             if (backends[i]->backendflag == selectedBackend) {
                 result = backends[i]->CreateDevice(debugMode, preferLowPower, props);
                 if (result != NULL) {
-                    SDL_Log("Created GPU device with backend: %s", backends[i]->Name);
                     result->backend = backends[i]->backendflag;
                     result->shaderFormats = backends[i]->shaderFormats;
                     result->debugMode = debugMode;
                     break;
                 }
-                /* DELETE THIS LINE */ SDL_LogError(SDL_LOG_CATEGORY_GPU, "Failed to create GPU device with backend: %s", backends[i]->Name);
             }
         }
     }

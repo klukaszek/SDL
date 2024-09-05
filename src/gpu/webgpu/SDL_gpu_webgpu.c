@@ -4,6 +4,9 @@
 // License: MIT
 // Description: WebGPU driver for SDL_gpu using the emscripten WebGPU implementation
 // Note: Compiling SDL GPU programs using emscripten will require -sUSE_WEBGPU=1
+//
+// TODO:
+// - Implement WebGPU_ClaimWindow and manually assign the pointer to the driver so that we can try to use the html canvas
 
 #include "../SDL_sysgpu.h"
 #include "SDL_internal.h"
@@ -147,7 +150,7 @@ static SDL_GPUDevice *WebGPU_CreateDevice(SDL_bool debug, bool preferLowPower, S
     renderer->debugMode = debug;
     renderer->preferLowPower = preferLowPower;
 
-    // Initialize WebGPU
+    // Initialize WebGPU instance so that we can request an adapter and then device
     renderer->instance = wgpuCreateInstance(NULL);
     if (!renderer->instance) {
         SDL_SetError("Failed to create WebGPU instance");
@@ -159,46 +162,33 @@ static SDL_GPUDevice *WebGPU_CreateDevice(SDL_bool debug, bool preferLowPower, S
 
     renderer->adapter_semaphore = SDL_CreateSemaphore(0);
 
-    // Request adapter
+    // Request adapter using the instance and then the device using the adapter
     WGPURequestAdapterOptions adapter_options = { 0 };
     wgpuInstanceRequestAdapter(renderer->instance, &adapter_options, WebGPU_RequestAdapterCallback, renderer);
 
-    SDL_WaitSemaphore(renderer->adapter_semaphore);
-
-    while(!renderer->device) {
+    // This seems to be necessary to ensure that the device is created before continuing
+    // This should probably be tested on all browsers to ensure that it works as expected
+    // but Chrome's Dawn WebGPU implementation needs this to work
+    while (!renderer->device) {
         emscripten_sleep(1);
     }
 
-    /*if (!renderer->adapter) {*/
-    /*    SDL_LogError(SDL_LOG_CATEGORY_GPU, "Failed to request WebGPU adapter");*/
-    /*    wgpuInstanceRelease(renderer->instance);*/
-    /*    SDL_free(renderer);*/
-    /*    return NULL;*/
-    /*}*/
-
-    /*// Request device from adapter*/
-    /*// TODO: Set up device descriptor according to the properties passed*/
-    /*WGPUDeviceDescriptor device_desc = { 0 };*/
-    /*wgpuAdapterRequestDevice(renderer->adapter, &device_desc, WebGPU_RequestDeviceCallback, renderer);*/
-    /*if (!renderer->device) {*/
-    /*    SDL_LogError(SDL_LOG_CATEGORY_GPU, "Failed to request WebGPU device");*/
-    /*    wgpuAdapterRelease(renderer->adapter);*/
-    /*    wgpuInstanceRelease(renderer->instance);*/
-    /*    SDL_free(renderer);*/
-    /*    return NULL;*/
-    /*}*/
+    // I was trying to use SDL_WaitSemaphore here, but it really doesn't seem to work as expected
+    // with emscripten, so I'm using emscripten_sleep instead
+    SDL_WaitSemaphore(renderer->adapter_semaphore);
 
     /*// Set our error callback for emscripten*/
     wgpuDeviceSetUncapturedErrorCallback(renderer->device, WebGPU_ErrorCallback, NULL);
 
-    // Set up function pointers
-    // TODO: Implement these functions
-    // result->DestroyDevice = WebGPU_DestroyDevice;
-    // result->CreateTexture = WebGPU_CreateTexture;
-    // ... (other function pointers)
-
     result = (SDL_GPUDevice *)SDL_malloc(sizeof(SDL_GPUDevice));
-    // TODO: Ensure that all function signatures for the driver are correct so that the following line compiles
+    /*
+    TODO: Ensure that all function signatures for the driver are correct so that the following line compiles
+          This will attach all of the driver's functions to the SDL_GPUDevice struct
+
+          i.e. result->CreateTexture = WebGPU_CreateTexture;
+               result->DestroyDevice = WebGPU_DestroyDevice;
+               ... etc.
+    */
     /*ASSIGN_DRIVER(WebGPU)*/
     result->driverData = (SDL_GPURenderer *)renderer;
 
