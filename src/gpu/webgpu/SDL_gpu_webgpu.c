@@ -1,4 +1,9 @@
 // File: /webgpu/SDL_gpu_webgpu.c
+// Author: Kyle Lukaszek
+// Email: kylelukaszek at gmail dot com
+// License: MIT
+// Description: WebGPU driver for SDL_gpu using the emscripten WebGPU implementation
+// Note: Compiling SDL GPU programs using emscripten will require -sUSE_WEBGPU=1
 
 #include "../SDL_sysgpu.h"
 #include "SDL_internal.h"
@@ -74,11 +79,25 @@ static void WebGPU_RequestDeviceCallback(WGPURequestDeviceStatus status, WGPUDev
     }
 }
 
+static bool WebGPU_PrepareDriver(SDL_VideoDevice *_this) {
+    bool result = true;
+
+    WebGPU_GPURenderer *renderer = (WebGPU_GPURenderer *)malloc(sizeof(WebGPU_GPURenderer));
+    if (!renderer) {
+        SDL_OutOfMemory();
+        return false;
+    }
+
+    SDL_memset(renderer, '\0', sizeof(WebGPU_GPURenderer));
+
+    return result;
+}
+
 static SDL_GPUDevice *WebGPU_CreateDevice(SDL_bool debug, bool preferLowPower, SDL_PropertiesID props)
 {
 
     WebGPU_GPURenderer *renderer;
-    SDL_GPUDevice *result;
+    SDL_GPUDevice *result = NULL;
 
     // Allocate memory for the renderer and device
     renderer = (WebGPU_GPURenderer *)SDL_malloc(sizeof(WebGPU_GPURenderer));
@@ -95,10 +114,6 @@ static SDL_GPUDevice *WebGPU_CreateDevice(SDL_bool debug, bool preferLowPower, S
     }
 
     SDL_LogInfo(SDL_LOG_CATEGORY_GPU, "SDL_GPU Driver: WebGPU");
-    SDL_LogInfo(
-        SDL_LOG_CATEGORY_GPU,
-        ""
-    )
 
     // Request adapter
     wgpuInstanceRequestAdapter(renderer->instance, NULL, WebGPU_RequestAdapterCallback, renderer);

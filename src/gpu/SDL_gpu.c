@@ -133,6 +133,9 @@ static const SDL_GPUBootstrap *backends[] = {
 #ifdef SDL_GPU_D3D11
     &D3D11Driver,
 #endif
+#ifdef __EMSCRIPTEN__
+    &WebGPUDriver,
+#endif
     NULL
 };
 
@@ -359,6 +362,8 @@ static SDL_GPUDriver SDL_GPUSelectBackend(
 {
     Uint32 i;
 
+    SDL_LogError(SDL_LOG_CATEGORY_GPU, "Selecting GPU driver: %s", gpudriver ? gpudriver : "none");
+
     // Environment/Properties override...
     if (gpudriver != NULL) {
         for (i = 0; backends[i]; i += 1) {
@@ -377,7 +382,11 @@ static SDL_GPUDriver SDL_GPUSelectBackend(
         return SDL_GPU_DRIVER_INVALID;
     }
 
+    SDL_LogError(SDL_LOG_CATEGORY_GPU, "No GPU driver hint set. Trying all available backends...");
     for (i = 0; backends[i]; i += 1) {
+        SDL_LogError(SDL_LOG_CATEGORY_GPU, "Trying backend %s...", backends[i]->Name);
+        SDL_LogError(SDL_LOG_CATEGORY_GPU, "Supported shader formats: 0x%08X", backends[i]->shaderFormats);
+        SDL_LogError(SDL_LOG_CATEGORY_GPU, "Required shader formats: 0x%08X", formatFlags);
         if ((backends[i]->shaderFormats & formatFlags) == 0) {
             // Don't select a backend which doesn't support the app's shaders.
             continue;
@@ -397,6 +406,9 @@ SDL_GPUDevice *SDL_CreateGPUDevice(
     const char *name)
 {
     SDL_GPUDevice *result;
+    #ifdef __EMSCRIPTEN__
+        SDL_SetHint(SDL_HINT_GPU_DRIVER, "webgpu");
+    #endif
     SDL_PropertiesID props = SDL_CreateProperties();
     if (formatFlags & SDL_GPU_SHADERFORMAT_PRIVATE) {
         SDL_SetBooleanProperty(props, SDL_PROP_GPU_DEVICE_CREATE_SHADERS_PRIVATE_BOOL, true);
@@ -464,7 +476,11 @@ SDL_GPUDevice *SDL_CreateGPUDeviceWithProperties(SDL_PropertiesID props)
 
     gpudriver = SDL_GetHint(SDL_HINT_GPU_DRIVER);
     if (gpudriver == NULL) {
+        #ifdef __EMSCRIPTEN__
+        gpudriver = SDL_GetStringProperty(props, SDL_PROP_GPU_DEVICE_CREATE_NAME_STRING, "webgpu");
+        #else
         gpudriver = SDL_GetStringProperty(props, SDL_PROP_GPU_DEVICE_CREATE_NAME_STRING, NULL);
+        #endif
     }
 
     selectedBackend = SDL_GPUSelectBackend(_this, gpudriver, formatFlags);
