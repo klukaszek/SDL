@@ -8,6 +8,7 @@
 #include "../SDL_sysgpu.h"
 #include "SDL_internal.h"
 #include <SDL3/SDL_gpu.h>
+#include <SDL3/SDL_mutex.h>
 #include <SDL3/SDL_properties.h>
 #include <SDL3/SDL_stdinc.h>
 #include <emscripten/emscripten.h>
@@ -31,6 +32,7 @@ typedef struct WebGPU_GPURenderer
     uint32_t sample_count;
     bool debugMode;
     bool preferLowPower;
+    SDL_Semaphore *adapter_semaphore;
 } WebGPU_GPURenderer;
 
 typedef struct WebGPU_GPUTexture
@@ -59,38 +61,78 @@ static void WebGPU_ErrorCallback(WGPUErrorType type, const char *message, void *
     SDL_SetError("WebGPU error: %s", message);
 }
 
-static void WebGPU_RequestAdapterCallback(WGPURequestAdapterStatus status, WGPUAdapter adapter, const char *message, void *userdata)
-{
-    WebGPU_GPURenderer *renderer = (WebGPU_GPURenderer *)userdata;
-    if (status == WGPURequestAdapterStatus_Success) {
-        renderer->adapter = adapter;
-    } else {
-        SDL_SetError("Failed to request WebGPU adapter: %s", message);
-    }
-}
-
 static void WebGPU_RequestDeviceCallback(WGPURequestDeviceStatus status, WGPUDevice device, const char *message, void *userdata)
 {
     WebGPU_GPURenderer *renderer = (WebGPU_GPURenderer *)userdata;
     if (status == WGPURequestDeviceStatus_Success) {
         renderer->device = device;
+        SDL_SignalSemaphore(renderer->adapter_semaphore);
+        SDL_Log("WebGPU device requested successfully");
     } else {
-        SDL_SetError("Failed to request WebGPU device: %s", message);
+        SDL_LogError(SDL_LOG_CATEGORY_GPU, "Failed to request WebGPU device: %s", message);
     }
 }
 
-static bool WebGPU_PrepareDriver(SDL_VideoDevice *_this) {
-    bool result = true;
+static void WebGPU_RequestAdapterCallback(WGPURequestAdapterStatus status, WGPUAdapter adapter, const char *message, void *userdata)
+{
+    WebGPU_GPURenderer *renderer = (WebGPU_GPURenderer *)userdata;
+    if (status != WGPURequestAdapterStatus_Success) {
+        SDL_LogError(SDL_LOG_CATEGORY_GPU, "Failed to request WebGPU adapter: %s", message);
+    } else {
+        renderer->adapter = adapter;
+        SDL_Log("WebGPU adapter requested successfully");
 
-    WebGPU_GPURenderer *renderer = (WebGPU_GPURenderer *)malloc(sizeof(WebGPU_GPURenderer));
-    if (!renderer) {
-        SDL_OutOfMemory();
-        return false;
+        // Request device from adapter
+        WGPUFeatureName requiredFeatures[1] = {
+            WGPUFeatureName_Depth32FloatStencil8
+        };
+        WGPUDeviceDescriptor dev_desc = {
+            .requiredFeatureCount = 1,
+            .requiredFeatures = requiredFeatures,
+        };
+        wgpuAdapterRequestDevice(renderer->adapter, &dev_desc, WebGPU_RequestDeviceCallback, renderer);
     }
+}
 
-    SDL_memset(renderer, '\0', sizeof(WebGPU_GPURenderer));
-
-    return result;
+static bool WebGPU_PrepareDriver(SDL_VideoDevice *_this)
+{
+    /*WebGPU_GPURenderer *renderer = (WebGPU_GPURenderer *)malloc(sizeof(WebGPU_GPURenderer));*/
+    /*if (!renderer) {*/
+    /*    SDL_OutOfMemory();*/
+    /*    return false;*/
+    /*}*/
+    /**/
+    /*SDL_memset(renderer, '\0', sizeof(WebGPU_GPURenderer));*/
+    /**/
+    /*renderer->instance = wgpuCreateInstance(NULL);*/
+    /*if (!renderer->instance) {*/
+    /*    SDL_LogError(SDL_LOG_CATEGORY_GPU, "Failed to create WebGPU instance");*/
+    /*    SDL_free(renderer);*/
+    /*    return false;*/
+    /*}*/
+    /**/
+    /*SDL_LogInfo(SDL_LOG_CATEGORY_GPU, "Preparing SDL_GPU Driver: WebGPU");*/
+    /*SDL_Log("WebGPU instance created successfully");*/
+    /**/
+    /*renderer->adapter_semaphore = SDL_CreateSemaphore(0);*/
+    /**/
+    /*// Request adapter*/
+    /*WGPURequestAdapterOptions adapter_options = { 0 };*/
+    /**/
+    /*wgpuInstanceRequestAdapter(renderer->instance, &adapter_options, WebGPU_RequestAdapterCallback, renderer);*/
+    /**/
+    /*// Wait for the adapter semaphore to be posted*/
+    /*SDL_WaitSemaphore(renderer->adapter_semaphore);*/
+    /**/
+    /*SDL_Log("Adapter semaphore posted");*/
+    /**/
+    /*SDL_DestroySemaphore(renderer->adapter_semaphore);*/
+    /**/
+    /*// Since we've reached this point, we can assume that the driver is ready*/
+    /*// and we can free the renderer and return true*/
+    /*// We don't have to worry about unloading libraries or anything like that*/
+    /*SDL_free(renderer);*/
+    return true;
 }
 
 static SDL_GPUDevice *WebGPU_CreateDevice(SDL_bool debug, bool preferLowPower, SDL_PropertiesID props)
@@ -115,28 +157,38 @@ static SDL_GPUDevice *WebGPU_CreateDevice(SDL_bool debug, bool preferLowPower, S
 
     SDL_LogInfo(SDL_LOG_CATEGORY_GPU, "SDL_GPU Driver: WebGPU");
 
+    renderer->adapter_semaphore = SDL_CreateSemaphore(0);
+
     // Request adapter
-    wgpuInstanceRequestAdapter(renderer->instance, NULL, WebGPU_RequestAdapterCallback, renderer);
-    if (!renderer->adapter) {
-        SDL_SetError("Failed to get WebGPU adapter");
-        wgpuInstanceRelease(renderer->instance);
-        SDL_free(renderer);
-        return NULL;
+    WGPURequestAdapterOptions adapter_options = { 0 };
+    wgpuInstanceRequestAdapter(renderer->instance, &adapter_options, WebGPU_RequestAdapterCallback, renderer);
+
+    SDL_WaitSemaphore(renderer->adapter_semaphore);
+
+    while(!renderer->device) {
+        emscripten_sleep(1);
     }
 
-    // Request device from adapter
-    // TODO: Set up device descriptor according to the properties passed
-    WGPUDeviceDescriptor device_desc = { 0 };
-    wgpuAdapterRequestDevice(renderer->adapter, &device_desc, WebGPU_RequestDeviceCallback, renderer);
-    if (!renderer->device) {
-        SDL_SetError("Failed to create WebGPU device");
-        wgpuAdapterRelease(renderer->adapter);
-        wgpuInstanceRelease(renderer->instance);
-        SDL_free(renderer);
-        return NULL;
-    }
+    /*if (!renderer->adapter) {*/
+    /*    SDL_LogError(SDL_LOG_CATEGORY_GPU, "Failed to request WebGPU adapter");*/
+    /*    wgpuInstanceRelease(renderer->instance);*/
+    /*    SDL_free(renderer);*/
+    /*    return NULL;*/
+    /*}*/
 
-    // Set our error callback for emscripten
+    /*// Request device from adapter*/
+    /*// TODO: Set up device descriptor according to the properties passed*/
+    /*WGPUDeviceDescriptor device_desc = { 0 };*/
+    /*wgpuAdapterRequestDevice(renderer->adapter, &device_desc, WebGPU_RequestDeviceCallback, renderer);*/
+    /*if (!renderer->device) {*/
+    /*    SDL_LogError(SDL_LOG_CATEGORY_GPU, "Failed to request WebGPU device");*/
+    /*    wgpuAdapterRelease(renderer->adapter);*/
+    /*    wgpuInstanceRelease(renderer->instance);*/
+    /*    SDL_free(renderer);*/
+    /*    return NULL;*/
+    /*}*/
+
+    /*// Set our error callback for emscripten*/
     wgpuDeviceSetUncapturedErrorCallback(renderer->device, WebGPU_ErrorCallback, NULL);
 
     // Set up function pointers
@@ -144,6 +196,13 @@ static SDL_GPUDevice *WebGPU_CreateDevice(SDL_bool debug, bool preferLowPower, S
     // result->DestroyDevice = WebGPU_DestroyDevice;
     // result->CreateTexture = WebGPU_CreateTexture;
     // ... (other function pointers)
+
+    result = (SDL_GPUDevice *)SDL_malloc(sizeof(SDL_GPUDevice));
+    // TODO: Ensure that all function signatures for the driver are correct so that the following line compiles
+    /*ASSIGN_DRIVER(WebGPU)*/
+    result->driverData = (SDL_GPURenderer *)renderer;
+
+    SDL_Log("WebGPU driver created successfully");
 
     return result;
 }
