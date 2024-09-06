@@ -315,25 +315,141 @@ static WindowData *WebGPU_INTERNAL_FetchWindowData(SDL_Window *window)
     return (WindowData *)SDL_GetPointerProperty(properties, WINDOW_PROPERTY_DATA, NULL);
 }
 
+static SDL_GPUTextureFormat SwapchainCompositionToSDLFormat(
+    SDL_GPUSwapchainComposition composition,
+    bool usingFallback)
+{
+    switch (composition) {
+    case SDL_GPU_SWAPCHAINCOMPOSITION_SDR:
+        return usingFallback ? SDL_GPU_TEXTUREFORMAT_R8G8B8A8_UNORM : SDL_GPU_TEXTUREFORMAT_B8G8R8A8_UNORM;
+    case SDL_GPU_SWAPCHAINCOMPOSITION_SDR_LINEAR:
+        return usingFallback ? SDL_GPU_TEXTUREFORMAT_R8G8B8A8_UNORM_SRGB : SDL_GPU_TEXTUREFORMAT_B8G8R8A8_UNORM_SRGB;
+    case SDL_GPU_SWAPCHAINCOMPOSITION_HDR_EXTENDED_LINEAR:
+        return SDL_GPU_TEXTUREFORMAT_R16G16B16A16_FLOAT;
+    case SDL_GPU_SWAPCHAINCOMPOSITION_HDR10_ST2048:
+        return SDL_GPU_TEXTUREFORMAT_R10G10B10A2_UNORM;
+    default:
+        return SDL_GPU_TEXTUREFORMAT_INVALID;
+    }
+}
+
+static WGPUPresentMode
+SDLToWGPUPresentMode(SDL_GPUPresentMode presentMode)
+{
+    switch (presentMode) {
+    case SDL_GPU_PRESENTMODE_IMMEDIATE:
+        SDL_Log("WebGPU: Immediate present mode.");
+        return WGPUPresentMode_Immediate;
+    case SDL_GPU_PRESENTMODE_MAILBOX:
+        SDL_Log("WebGPU: Mailbox present mode.");
+        return WGPUPresentMode_Mailbox;
+    case SDL_GPU_PRESENTMODE_VSYNC:
+        SDL_Log("WebGPU: VSYNC/FIFO present mode.");
+        return WGPUPresentMode_Fifo;
+    default:
+        SDL_Log("WebGPU: Defaulting to VSYNC/FIFO present mode.");
+        return WGPUPresentMode_Fifo;
+    }
+}
+
 static bool WebGPU_INTERNAL_CreateSwapchain(WebGPURenderer *renderer, WindowData *windowData)
 {
-    WGPUSwapChainDescriptor swapchainDesc;
     bool hasValidSwapchainComposition, hasValidPresentMode;
-    Sint32 drawableWidth, drawableHeight;
-    Uint32 i;
+    double drawableWidth, drawableHeight;
     SDL_VideoDevice *_this = SDL_GetVideoDevice();
+    windowData->swapchainData = SDL_calloc(1, sizeof(WebGPUSwapchainData));
+    WebGPUSwapchainData *swapchainData = windowData->swapchainData;
 
     // Create the surface for the browser swapchain
     SDL_assert(_this && WebGPU_CreateSurface(renderer, windowData));
 
-    SwapchainSupportDetails swapchainSupportDetails = {
-        .formats = &(WGPUTextureFormat){ wgpuSurfaceGetPreferredFormat(windowData->swapchainData->surface, renderer->adapter) },
-        .formatsLength = 1,
-        .presentModes = &(WGPUPresentMode){ WGPUPresentMode_Fifo }, // Use FIFO as the default present mode for now
-        .presentModesLength = 1,
+    switch (windowData->swapchainComposition) {
+    case SDL_GPU_SWAPCHAINCOMPOSITION_SDR:
+    case SDL_GPU_SWAPCHAINCOMPOSITION_SDR_LINEAR:
+        hasValidSwapchainComposition = true;
+        break;
+    default:
+        SDL_LogError(SDL_LOG_CATEGORY_GPU, "Invalid swapchain composition type");
+        hasValidSwapchainComposition = false;
+        break;
+    }
+
+    // Convert the SDL present mode to a WebGPU present mode
+    swapchainData->presentMode = SDLToWGPUPresentMode(windowData->presentMode);
+    switch (swapchainData->presentMode) {
+    case WGPUPresentMode_Immediate:
+    case WGPUPresentMode_Mailbox:
+    case WGPUPresentMode_Fifo:
+        hasValidPresentMode = true;
+        break;
+    default:
+        SDL_LogError(SDL_LOG_CATEGORY_GPU, "Invalid present mode");
+        hasValidPresentMode = false;
+        break;
+    }
+
+    // Ensure that we have a valid swapchain composition and present mode
+    if (!hasValidSwapchainComposition) {
+        SDL_LogError(SDL_LOG_CATEGORY_GPU, "Invalid swapchain composition type");
+        return false;
+    } else if (!hasValidPresentMode) {
+        SDL_LogError(SDL_LOG_CATEGORY_GPU, "Invalid present mode");
+        return false;
+    }
+
+    // Get the drawable size of the canvas
+    emscripten_get_element_css_size("#canvas", &drawableWidth, &drawableHeight);
+
+    SDL_Log("WebGPU: Creating swapchain of size %.0fx%.0f", drawableWidth, drawableHeight);
+
+    // Create swapchain descriptor from SDL_Window properties and emscripten canvas size
+    swapchainData->swapchainDesc = (WGPUSwapChainDescriptor){
+        .usage = WGPUTextureUsage_RenderAttachment,
+        .format = wgpuSurfaceGetPreferredFormat(swapchainData->surface, renderer->adapter),
+        .width = (uint32_t)drawableWidth,
+        .height = (uint32_t)drawableHeight,
+        .presentMode = swapchainData->presentMode,
     };
 
-    SDL_Log("WebGPU: Creating swapchain for window %p", windowData->window);
+    // Create the swapchain
+    swapchainData->swapchain = wgpuDeviceCreateSwapChain(
+        renderer->device,
+        swapchainData->surface,
+        &swapchainData->swapchainDesc);
+
+    SDL_assert(swapchainData->swapchain);
+
+    // We must create the swapchain textures after the swapchain is created
+    // We need to check sample count and format support for the swapchain textures
+    // If we have a sample count of 1, we can use the swapchain format directly
+    // If we have a sample count greater than 1, we have to keep a separate MSAA texture for the swapchain
+
+    // Create the swapchain texture
+    swapchainData->textureCount = 1;
+    swapchainData->textureContainers = SDL_calloc(swapchainData->textureCount, sizeof(WebGPUTextureContainer));
+    swapchainData->textureContainers[0].textureHandles = SDL_calloc(1, sizeof(WebGPUTextureHandle *));
+    swapchainData->textureContainers[0].textureHandles[0] = SDL_calloc(1, sizeof(WebGPUTextureHandle));
+    swapchainData->textureContainers[0].textureHandles[0]->webgpuTexture = SDL_calloc(1, sizeof(WebGPUTexture));
+    swapchainData->textureContainers[0].textureHandles[0]->webgpuTexture->texture = (void *)wgpuSwapChainGetCurrentTextureView(swapchainData->swapchain);
+    swapchainData->textureContainers[0].textureHandles[0]->webgpuTexture->fullView = (void *)wgpuSwapChainGetCurrentTextureView(swapchainData->swapchain);
+    swapchainData->textureContainers[0].textureHandles[0]->webgpuTexture->dimensions = (WGPUExtent3D){
+        .width = swapchainData->swapchainDesc.width,
+        .height = swapchainData->swapchainDesc.height,
+        .depthOrArrayLayers = 1,
+    };
+    swapchainData->textureContainers[0].textureHandles[0]->webgpuTexture->type = SDL_GPU_TEXTURETYPE_2D;
+    swapchainData->textureContainers[0].textureHandles[0]->webgpuTexture->isMSAAColorTarget = false;
+    swapchainData->textureContainers[0].textureHandles[0]->webgpuTexture->depth = 1;
+    swapchainData->textureContainers[0].textureHandles[0]->webgpuTexture->layerCount = 1;
+    swapchainData->textureContainers[0].textureHandles[0]->webgpuTexture->levelCount = 1;
+    swapchainData->textureContainers[0].textureHandles[0]->webgpuTexture->format = swapchainData->swapchainDesc.format;
+    swapchainData->textureContainers[0].textureHandles[0]->webgpuTexture->usageFlags = SDL_GPU_TEXTUREUSAGE_COLOR_TARGET;
+    swapchainData->textureContainers[0].textureHandles[0]->webgpuTexture->subresourceCount = 1;
+    swapchainData->textureContainers[0].textureHandles[0]->webgpuTexture->subresources = SDL_calloc(1, sizeof(WebGPUTextureSubresource));
+    swapchainData->textureContainers[0].textureHandles[0]->webgpuTexture->handle = swapchainData->textureContainers[0].textureHandles[0];
+    swapchainData->textureContainers[0].textureHandles[0]->container = &swapchainData->textureContainers[0];
+    swapchainData->textureContainers[0].textureHandles[0]->webgpuTexture->markedForDestroy = 0;
+    swapchainData->textureContainers[0].textureHandles[0]->webgpuTexture->referenceCount = (SDL_AtomicInt){1};
 
     return true;
 }
