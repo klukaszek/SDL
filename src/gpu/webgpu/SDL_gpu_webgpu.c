@@ -247,11 +247,13 @@ typedef struct WebGPURenderer
     SDL_Mutex *acquireUniformBufferLock;
 } WebGPURenderer;
 
+// Simple Error Callback for WebGPU
 static void WebGPU_ErrorCallback(WGPUErrorType type, const char *message, void *userdata)
 {
     SDL_SetError("WebGPU error: %s", message);
 }
 
+// Device Request Callback for when the device is requested from the adapter
 static void WebGPU_RequestDeviceCallback(WGPURequestDeviceStatus status, WGPUDevice device, const char *message, void *userdata)
 {
     WebGPURenderer *renderer = (WebGPURenderer *)userdata;
@@ -264,6 +266,8 @@ static void WebGPU_RequestDeviceCallback(WGPURequestDeviceStatus status, WGPUDev
     }
 }
 
+// Callback for requesting an adapter from the WebGPU instance
+// This will then request a device from the adapter once the adapter is successfully requested
 static void WebGPU_RequestAdapterCallback(WGPURequestAdapterStatus status, WGPUAdapter adapter, const char *message, void *userdata)
 {
     WebGPURenderer *renderer = (WebGPURenderer *)userdata;
@@ -285,11 +289,11 @@ static void WebGPU_RequestAdapterCallback(WGPURequestAdapterStatus status, WGPUA
     }
 }
 
+// Fetch the necessary PropertiesID for the WindowData for a browser window
 static WindowData *WebGPU_INTERNAL_FetchWindowData(
     SDL_Window *window)
 {
     SDL_PropertiesID properties = SDL_GetWindowProperties(window);
-    SDL_Log("Fetched Window Data: Success", properties);
     return (WindowData *)SDL_GetPointerProperty(properties, WINDOW_PROPERTY_DATA, NULL);
 }
 
