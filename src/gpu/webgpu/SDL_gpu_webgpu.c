@@ -7,6 +7,8 @@
 //
 // TODO:
 // - Implement WebGPU_ClaimWindow and manually assign the pointer to the driver so that we can try to use the html canvas
+//  -- Implement WebGPU_INTERNAL_CreateSwapchain to create the swapchain and swapchain textures for ClaimWindow
+//  -- Ensure that we are handling all errors correctly and that we are properly cleaning up resources
 
 #include "../SDL_sysgpu.h"
 #include "SDL_internal.h"
@@ -18,46 +20,232 @@
 #include <emscripten/html5.h>
 #include <webgpu/webgpu.h>
 
-typedef struct WebGPU_GPURenderer
+#define MAX_UBO_SECTION_SIZE          4096     // 4   KiB
+#define DESCRIPTOR_POOL_STARTING_SIZE 128
+#define WINDOW_PROPERTY_DATA          "SDL_GPUWebGPUWindowPropertyData"
+
+#define EXPAND_ELEMENTS_IF_NEEDED(arr, initialValue, type) \
+    if (arr->count == arr->capacity) {                     \
+        if (arr->capacity == 0) {                          \
+            arr->capacity = initialValue;                  \
+        } else {                                           \
+            arr->capacity *= 2;                            \
+        }                                                  \
+        arr->elements = (type *)SDL_realloc(               \
+            arr->elements,                                 \
+            arr->capacity * sizeof(type));                 \
+    }
+
+#define EXPAND_ARRAY_IF_NEEDED(arr, elementType, newCount, capacity, newCapacity) \
+    if (newCount >= capacity) {                                                   \
+        capacity = newCapacity;                                                   \
+        arr = (elementType *)SDL_realloc(                                         \
+            arr,                                                                  \
+            sizeof(elementType) * capacity);                                      \
+    }
+
+#define MOVE_ARRAY_CONTENTS_AND_RESET(i, dstArr, dstCount, srcArr, srcCount) \
+    for (i = 0; i < srcCount; i += 1) {                                      \
+        dstArr[i] = srcArr[i];                                               \
+    }                                                                        \
+    dstCount = srcCount;                                                     \
+    srcCount = 0;
+
+// Structures
+
+typedef struct WebGPUBuffer WebGPUBuffer;
+typedef struct WebGPUBufferContainer WebGPUBufferContainer;
+typedef struct WebGPUTexture WebGPUTexture;
+typedef struct WebGPUTextureContainer WebGPUTextureContainer;
+
+typedef struct WebGPUFenceHandle
 {
+    SDL_Mutex *lock;
+    SDL_AtomicInt referenceCount;
+} WebGPUFenceHandle;
+
+// Buffer structures
+
+typedef struct WebGPUBufferHandle
+{
+    WebGPUBuffer *webgpuBuffer;
+    WebGPUBufferContainer *container;
+} WebGPUBufferHandle;
+
+typedef enum WebGPUBufferType
+{
+    WEBGPU_BUFFER_TYPE_GPU,
+    WEBGPU_BUFFER_TYPE_UNIFORM,
+    WEBGPU_BUFFER_TYPE_TRANSFER
+} WebGPUBufferType;
+
+struct WebGPUBuffer
+{
+    WGPUBuffer buffer;
+    uint64_t size;
+
+    WebGPUBufferType type;
+    SDL_GPUBufferUsageFlags usageFlags;
+
+    SDL_AtomicInt referenceCount;
+
+    WebGPUBufferHandle *handle;
+
+    bool transitioned;
+    Uint8 markedForDestroy;
+};
+
+struct WebGPUBufferContainer
+{
+    WebGPUBufferHandle *activeBufferHandle;
+
+    Uint32 bufferCapacity;
+    Uint32 bufferCount;
+    WebGPUBufferHandle **bufferHandles;
+
+    char *debugName;
+};
+
+// Texture structures
+
+typedef struct WebGPUTextureHandle
+{
+    WebGPUTexture *webgpuTexture;
+    WebGPUTextureContainer *container;
+} WebGPUTextureHandle;
+
+typedef struct WebGPUTextureSubresource
+{
+    WebGPUTexture *parent;
+    Uint32 layer;
+    Uint32 level;
+
+    WGPUTextureView *renderTargetViews;
+    WGPUTextureView computeWriteView;
+    WGPUTextureView depthStencilView;
+
+    WebGPUTextureHandle *msaaTexHandle;
+
+    bool transitioned;
+} WebGPUTextureSubresource;
+
+struct WebGPUTexture
+{
+    WGPUTexture texture;
+    WGPUTextureView fullView;
+    WGPUExtent3D dimensions;
+
+    SDL_GPUTextureType type;
+    Uint8 isMSAAColorTarget;
+
+    Uint32 depth;
+    Uint32 layerCount;
+    Uint32 levelCount;
+    WGPUTextureFormat format;
+    SDL_GPUTextureUsageFlags usageFlags;
+
+    Uint32 subresourceCount;
+    WebGPUTextureSubresource *subresources;
+
+    WebGPUTextureHandle *handle;
+
+    Uint8 markedForDestroy;
+    SDL_AtomicInt referenceCount;
+};
+
+struct WebGPUTextureContainer
+{
+    TextureCommonHeader header;
+
+    WebGPUTextureHandle *activeTextureHandle;
+
+    Uint32 textureCapacity;
+    Uint32 textureCount;
+    WebGPUTextureHandle **textureHandles;
+
+    Uint8 canBeCycled;
+
+    char *debugName;
+};
+
+// Swapchain structures
+
+typedef struct SwapchainSupportDetails
+{
+    // should just call wgpuSurfaceGetPreferredFormat
+    WGPUTextureFormat *formats;
+    Uint32 formatsLength;
+    WGPUPresentMode *presentModes;
+    Uint32 presentModesLength;
+} SwapchainSupportDetails;
+
+typedef struct WebGPUSwapchainData
+{
+    // Surface
+    WGPUSurface surface;
+    // Swapchain for emscripten surface
+    WGPUSwapChain swapchain;
+    WGPUTextureFormat format;
+    WGPUPresentMode presentMode;
+    // Swapchain textures
+    WebGPUTextureContainer *textureContainers;
+    uint32_t textureCount;
+    // Synchronization primitives
+    uint32_t currentTextureIndex;
+    uint32_t frameCounter;
+    // Configuration
+    WGPUSwapChainDescriptor swapchainDesc;
+} WebGPUSwapchainData;
+
+typedef struct WindowData
+{
+    SDL_Window *window;
+    SDL_GPUSwapchainComposition swapchainComposition;
+    SDL_GPUPresentMode presentMode;
+    WebGPUSwapchainData *swapchainData;
+    bool needsSwapchainRecreate;
+} WindowData;
+
+// Renderer Structure
+
+typedef struct WebGPURenderer WebGPURenderer;
+
+typedef struct WebGPUCommandBuffer
+{
+    CommandBufferCommonHeader common;
+    WebGPURenderer *renderer;
+
+    WGPUCommandEncoder commandEncoder;
+    WGPURenderPassEncoder renderPassEncoder;
+    WGPUComputePassEncoder computePassEncoder;
+
+    // ... (other fields as needed)
+
+} WebGPUCommandBuffer;
+
+typedef struct WebGPURenderer
+{
+    bool debugMode;
+    bool preferLowPower;
+
+    // WebGPU objects
     WGPUInstance instance;
     WGPUAdapter adapter;
     WGPUDevice device;
-    WGPUSurface surface;
-    WGPUSwapChain swapchain;
-    WGPUTextureFormat render_format;
-    WGPUTexture depth_stencil_tex;
-    WGPUTextureView depth_stencil_view;
-    WGPUTexture msaa_tex;
-    WGPUTextureView msaa_view;
-    uint32_t width;
-    uint32_t height;
-    uint32_t sample_count;
-    bool debugMode;
-    bool preferLowPower;
+    WGPUQueue queue;
+
+    // Window data
+    WindowData **claimedWindows;
+    Uint32 claimedWindowCount;
+    Uint32 claimedWindowCapacity;
+
     SDL_Semaphore *adapter_semaphore;
-} WebGPU_GPURenderer;
-
-typedef struct WebGPU_GPUTexture
-{
-    TextureCommonHeader common;
-    WGPUTexture texture;
-    WGPUTextureView view;
-} WebGPU_GPUTexture;
-
-typedef struct WebGPU_GPUBuffer
-{
-    WGPUBuffer buffer;
-    Uint64 size;
-    WGPUBufferUsage usage;
-} WebGPU_GPUBuffer;
-
-typedef struct WebGPU_GPUCommandBuffer
-{
-    CommandBufferCommonHeader common;
-    WGPUCommandEncoder encoder;
-    WGPUCommandBuffer cmd_buffer;
-} WebGPU_GPUCommandBuffer;
+    SDL_Mutex *allocatorLock;
+    SDL_Mutex *disposeLock;
+    SDL_Mutex *submitLock;
+    SDL_Mutex *acquireCommandBufferLock;
+    SDL_Mutex *acquireUniformBufferLock;
+} WebGPURenderer;
 
 static void WebGPU_ErrorCallback(WGPUErrorType type, const char *message, void *userdata)
 {
@@ -66,7 +254,7 @@ static void WebGPU_ErrorCallback(WGPUErrorType type, const char *message, void *
 
 static void WebGPU_RequestDeviceCallback(WGPURequestDeviceStatus status, WGPUDevice device, const char *message, void *userdata)
 {
-    WebGPU_GPURenderer *renderer = (WebGPU_GPURenderer *)userdata;
+    WebGPURenderer *renderer = (WebGPURenderer *)userdata;
     if (status == WGPURequestDeviceStatus_Success) {
         renderer->device = device;
         SDL_SignalSemaphore(renderer->adapter_semaphore);
@@ -78,7 +266,7 @@ static void WebGPU_RequestDeviceCallback(WGPURequestDeviceStatus status, WGPUDev
 
 static void WebGPU_RequestAdapterCallback(WGPURequestAdapterStatus status, WGPUAdapter adapter, const char *message, void *userdata)
 {
-    WebGPU_GPURenderer *renderer = (WebGPU_GPURenderer *)userdata;
+    WebGPURenderer *renderer = (WebGPURenderer *)userdata;
     if (status != WGPURequestAdapterStatus_Success) {
         SDL_LogError(SDL_LOG_CATEGORY_GPU, "Failed to request WebGPU adapter: %s", message);
     } else {
@@ -97,56 +285,86 @@ static void WebGPU_RequestAdapterCallback(WGPURequestAdapterStatus status, WGPUA
     }
 }
 
+static WindowData *WebGPU_INTERNAL_FetchWindowData(
+    SDL_Window *window)
+{
+    SDL_PropertiesID properties = SDL_GetWindowProperties(window);
+    SDL_Log("Fetched Window Data: Success", properties);
+    return (WindowData *)SDL_GetPointerProperty(properties, WINDOW_PROPERTY_DATA, NULL);
+}
+
+static bool WebGPU_INTERNAL_CreateSwapchain(
+    WebGPURenderer *renderer,
+    WindowData *windowData)
+{
+    WebGPUSwapchainData *swapchainData;
+    WGPUSurfaceDescriptor surfaceDesc;
+    WGPUTextureDescriptor textureDesc;
+    WGPUSwapChainDescriptor swapchainDesc;
+    SwapchainSupportDetails swapchainSupportDetails;
+    bool hasValidSwapchainComposition, hasValidPresentMode;
+    Sint32 drawableWidth, drawableHeight;
+    Uint32 i;
+    SDL_VideoDevice *_this = SDL_GetVideoDevice();
+
+    /*SDL_assert(_this && _this->WebGPU_CreateSurface);*/
+
+    return true;
+}
+
+static bool WebGPU_ClaimWindow(
+    SDL_GPURenderer *driverData,
+    SDL_Window *window)
+{
+    WebGPURenderer *renderer = (WebGPURenderer *)driverData;
+    WindowData *windowData = WebGPU_INTERNAL_FetchWindowData(window);
+
+    if (windowData == NULL) {
+        windowData = SDL_malloc(sizeof(WindowData));
+        windowData->window = window;
+        windowData->presentMode = SDL_GPU_PRESENTMODE_VSYNC;
+        windowData->swapchainComposition = SDL_GPU_SWAPCHAINCOMPOSITION_SDR;
+
+        if (WebGPU_INTERNAL_CreateSwapchain(renderer, windowData)) {
+            SDL_SetPointerProperty(SDL_GetWindowProperties(window), WINDOW_PROPERTY_DATA, windowData);
+
+            if (renderer->claimedWindowCount >= renderer->claimedWindowCapacity) {
+                renderer->claimedWindowCapacity *= 2;
+                renderer->claimedWindows = SDL_realloc(
+                    renderer->claimedWindows,
+                    renderer->claimedWindowCapacity * sizeof(WindowData *));
+            }
+
+            renderer->claimedWindows[renderer->claimedWindowCount] = windowData;
+            renderer->claimedWindowCount += 1;
+
+            /*SDL_AddEventWatch(WebGPU_INTERNAL_OnWindowResize, window);*/
+
+            return 1;
+        } else {
+            SDL_LogError(SDL_LOG_CATEGORY_GPU, "Could not create swapchain, failed to claim window!");
+            SDL_free(windowData);
+            return 0;
+        }
+    } else {
+        SDL_LogWarn(SDL_LOG_CATEGORY_GPU, "Window already claimed!");
+        return 0;
+    }
+}
+
 static bool WebGPU_PrepareDriver(SDL_VideoDevice *_this)
 {
-    /*WebGPU_GPURenderer *renderer = (WebGPU_GPURenderer *)malloc(sizeof(WebGPU_GPURenderer));*/
-    /*if (!renderer) {*/
-    /*    SDL_OutOfMemory();*/
-    /*    return false;*/
-    /*}*/
-    /**/
-    /*SDL_memset(renderer, '\0', sizeof(WebGPU_GPURenderer));*/
-    /**/
-    /*renderer->instance = wgpuCreateInstance(NULL);*/
-    /*if (!renderer->instance) {*/
-    /*    SDL_LogError(SDL_LOG_CATEGORY_GPU, "Failed to create WebGPU instance");*/
-    /*    SDL_free(renderer);*/
-    /*    return false;*/
-    /*}*/
-    /**/
-    /*SDL_LogInfo(SDL_LOG_CATEGORY_GPU, "Preparing SDL_GPU Driver: WebGPU");*/
-    /*SDL_Log("WebGPU instance created successfully");*/
-    /**/
-    /*renderer->adapter_semaphore = SDL_CreateSemaphore(0);*/
-    /**/
-    /*// Request adapter*/
-    /*WGPURequestAdapterOptions adapter_options = { 0 };*/
-    /**/
-    /*wgpuInstanceRequestAdapter(renderer->instance, &adapter_options, WebGPU_RequestAdapterCallback, renderer);*/
-    /**/
-    /*// Wait for the adapter semaphore to be posted*/
-    /*SDL_WaitSemaphore(renderer->adapter_semaphore);*/
-    /**/
-    /*SDL_Log("Adapter semaphore posted");*/
-    /**/
-    /*SDL_DestroySemaphore(renderer->adapter_semaphore);*/
-    /**/
-    /*// Since we've reached this point, we can assume that the driver is ready*/
-    /*// and we can free the renderer and return true*/
-    /*// We don't have to worry about unloading libraries or anything like that*/
-    /*SDL_free(renderer);*/
     return true;
 }
 
 static SDL_GPUDevice *WebGPU_CreateDevice(SDL_bool debug, bool preferLowPower, SDL_PropertiesID props)
 {
-
-    WebGPU_GPURenderer *renderer;
+    WebGPURenderer *renderer;
     SDL_GPUDevice *result = NULL;
 
     // Allocate memory for the renderer and device
-    renderer = (WebGPU_GPURenderer *)SDL_malloc(sizeof(WebGPU_GPURenderer));
-    memset(renderer, '\0', sizeof(WebGPU_GPURenderer));
+    renderer = (WebGPURenderer *)SDL_malloc(sizeof(WebGPURenderer));
+    memset(renderer, '\0', sizeof(WebGPURenderer));
     renderer->debugMode = debug;
     renderer->preferLowPower = preferLowPower;
 
@@ -190,6 +408,7 @@ static SDL_GPUDevice *WebGPU_CreateDevice(SDL_bool debug, bool preferLowPower, S
                ... etc.
     */
     /*ASSIGN_DRIVER(WebGPU)*/
+    result->ClaimWindow = WebGPU_ClaimWindow;
     result->driverData = (SDL_GPURenderer *)renderer;
 
     SDL_Log("WebGPU driver created successfully");
