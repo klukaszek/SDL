@@ -20,7 +20,7 @@
 #include <emscripten/html5.h>
 #include <webgpu/webgpu.h>
 
-#define MAX_UBO_SECTION_SIZE          4096     // 4   KiB
+#define MAX_UBO_SECTION_SIZE          4096 // 4   KiB
 #define DESCRIPTOR_POOL_STARTING_SIZE 128
 #define WINDOW_PROPERTY_DATA          "SDL_GPUWebGPUWindowPropertyData"
 
@@ -289,29 +289,51 @@ static void WebGPU_RequestAdapterCallback(WGPURequestAdapterStatus status, WGPUA
     }
 }
 
+// Create a surface to use as the swapchain for the renderer
+static bool WebGPU_CreateSurface(WebGPURenderer *renderer, WindowData *windowData)
+{
+    // setup swapchain
+    WGPUSurfaceDescriptorFromCanvasHTMLSelector canvas_desc = {
+        .chain.sType = WGPUSType_SurfaceDescriptorFromCanvasHTMLSelector,
+        .selector = "#canvas",
+    };
+    WGPUSurfaceDescriptor surf_desc = {
+        .nextInChain = &canvas_desc.chain,
+    };
+    windowData->swapchainData->surface = wgpuInstanceCreateSurface(renderer->instance, &surf_desc);
+    if (!windowData->swapchainData->surface) {
+        SDL_LogError(SDL_LOG_CATEGORY_GPU, "Failed to create WebGPU surface for swapchain");
+        return false;
+    }
+    return true;
+}
+
 // Fetch the necessary PropertiesID for the WindowData for a browser window
-static WindowData *WebGPU_INTERNAL_FetchWindowData(
-    SDL_Window *window)
+static WindowData *WebGPU_INTERNAL_FetchWindowData(SDL_Window *window)
 {
     SDL_PropertiesID properties = SDL_GetWindowProperties(window);
     return (WindowData *)SDL_GetPointerProperty(properties, WINDOW_PROPERTY_DATA, NULL);
 }
 
-static bool WebGPU_INTERNAL_CreateSwapchain(
-    WebGPURenderer *renderer,
-    WindowData *windowData)
+static bool WebGPU_INTERNAL_CreateSwapchain(WebGPURenderer *renderer, WindowData *windowData)
 {
-    WebGPUSwapchainData *swapchainData;
-    WGPUSurfaceDescriptor surfaceDesc;
-    WGPUTextureDescriptor textureDesc;
     WGPUSwapChainDescriptor swapchainDesc;
-    SwapchainSupportDetails swapchainSupportDetails;
     bool hasValidSwapchainComposition, hasValidPresentMode;
     Sint32 drawableWidth, drawableHeight;
     Uint32 i;
     SDL_VideoDevice *_this = SDL_GetVideoDevice();
 
-    /*SDL_assert(_this && _this->WebGPU_CreateSurface);*/
+    // Create the surface for the browser swapchain
+    SDL_assert(_this && WebGPU_CreateSurface(renderer, windowData));
+
+    SwapchainSupportDetails swapchainSupportDetails = {
+        .formats = &(WGPUTextureFormat){ wgpuSurfaceGetPreferredFormat(windowData->swapchainData->surface, renderer->adapter) },
+        .formatsLength = 1,
+        .presentModes = &(WGPUPresentMode){ WGPUPresentMode_Fifo }, // Use FIFO as the default present mode for now
+        .presentModesLength = 1,
+    };
+
+    SDL_Log("WebGPU: Creating swapchain for window %p", windowData->window);
 
     return true;
 }
@@ -344,7 +366,7 @@ static bool WebGPU_ClaimWindow(
 
             /*SDL_AddEventWatch(WebGPU_INTERNAL_OnWindowResize, window);*/
 
-            return 1;
+            return true;
         } else {
             SDL_LogError(SDL_LOG_CATEGORY_GPU, "Could not create swapchain, failed to claim window!");
             SDL_free(windowData);
