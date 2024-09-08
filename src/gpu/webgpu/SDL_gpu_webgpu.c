@@ -12,12 +12,14 @@
 
 #include "../SDL_sysgpu.h"
 #include "SDL_internal.h"
+#include <SDL3/SDL_events.h>
 #include <SDL3/SDL_gpu.h>
 #include <SDL3/SDL_mutex.h>
 #include <SDL3/SDL_properties.h>
 #include <SDL3/SDL_stdinc.h>
 #include <emscripten/emscripten.h>
 #include <emscripten/html5.h>
+#include <stdint.h>
 #include <webgpu/webgpu.h>
 
 #define MAX_UBO_SECTION_SIZE          4096 // 4   KiB
@@ -289,6 +291,35 @@ static void WebGPU_RequestAdapterCallback(WGPURequestAdapterStatus status, WGPUA
     }
 }
 
+// Fetch the necessary PropertiesID for the WindowData for a browser window
+static WindowData *WebGPU_INTERNAL_FetchWindowData(SDL_Window *window)
+{
+    SDL_PropertiesID properties = SDL_GetWindowProperties(window);
+    return (WindowData *)SDL_GetPointerProperty(properties, WINDOW_PROPERTY_DATA, NULL);
+}
+
+// Callback for when the window is resized
+static SDL_bool WebGPU_INTERNAL_OnWindowResize(void *userdata, SDL_Event *event)
+{
+    SDL_Window *window = (SDL_Window *)userdata;
+    WindowData *windowData = WebGPU_INTERNAL_FetchWindowData(window);
+    if (windowData) {
+        windowData->needsSwapchainRecreate = true;
+    }
+
+    SDL_Log("Window resized, recreating swapchain");
+
+    return true;
+}
+
+static EM_BOOL emsc_window_resize_callback(int eventType, const EmscriptenUiEvent *uiEvent, void *userData)
+{
+    (void)eventType;
+    (void)uiEvent;
+    SDL_bool result = WebGPU_INTERNAL_OnWindowResize(userData, NULL);
+    return (EM_BOOL)result;
+}
+
 // Create a surface to use as the swapchain for the renderer
 static bool WebGPU_CreateSurface(WebGPURenderer *renderer, WindowData *windowData)
 {
@@ -306,13 +337,6 @@ static bool WebGPU_CreateSurface(WebGPURenderer *renderer, WindowData *windowDat
         return false;
     }
     return true;
-}
-
-// Fetch the necessary PropertiesID for the WindowData for a browser window
-static WindowData *WebGPU_INTERNAL_FetchWindowData(SDL_Window *window)
-{
-    SDL_PropertiesID properties = SDL_GetWindowProperties(window);
-    return (WindowData *)SDL_GetPointerProperty(properties, WINDOW_PROPERTY_DATA, NULL);
 }
 
 static SDL_GPUTextureFormat SwapchainCompositionToSDLFormat(
@@ -352,6 +376,146 @@ SDLToWGPUPresentMode(SDL_GPUPresentMode presentMode)
     }
 }
 
+SDL_GPUCommandBuffer *WebGPU_AcquireCommandBuffer(SDL_GPURenderer *driverData)
+{
+    WebGPURenderer *renderer = (WebGPURenderer *)driverData;
+    WebGPUCommandBuffer *commandBuffer = SDL_malloc(sizeof(WebGPUCommandBuffer));
+    memset(commandBuffer, '\0', sizeof(WebGPUCommandBuffer));
+    commandBuffer->renderer = renderer;
+
+    WGPUCommandEncoderDescriptor commandEncoderDesc = {
+        .label = "SDL_GPU Command Encoder",
+    };
+
+    commandBuffer->commandEncoder = wgpuDeviceCreateCommandEncoder(renderer->device, &commandEncoderDesc);
+
+    return (SDL_GPUCommandBuffer *)commandBuffer;
+}
+
+void WebGPU_Submit(SDL_GPUCommandBuffer *commandBuffer)
+{
+    WebGPUCommandBuffer *webgpuCommandBuffer = (WebGPUCommandBuffer *)commandBuffer;
+    WebGPURenderer *renderer = webgpuCommandBuffer->renderer;
+
+    WGPUCommandBufferDescriptor commandBufferDesc = {
+        .label = "SDL_GPU Command Buffer",
+    };
+
+    WGPUCommandBuffer commandHandle = wgpuCommandEncoderFinish(webgpuCommandBuffer->commandEncoder, &commandBufferDesc);
+    if (!commandHandle) {
+        SDL_LogError(SDL_LOG_CATEGORY_GPU, "Failed to finish command buffer");
+        return;
+    }
+    wgpuQueueSubmit(renderer->queue, 1, &commandHandle);
+    SDL_Log("WebGPU: Submitted command buffer %p", commandHandle);
+
+    // Release the actual command buffer followed by the SDL command buffer
+    wgpuCommandBufferRelease(commandHandle);
+    wgpuCommandEncoderRelease(webgpuCommandBuffer->commandEncoder);
+    SDL_free(webgpuCommandBuffer);
+}
+
+static WGPULoadOp SDLToWGPULoadOp(SDL_GPULoadOp loadOp)
+{
+    switch (loadOp) {
+    case SDL_GPU_LOADOP_LOAD:
+        return WGPULoadOp_Load;
+    case SDL_GPU_LOADOP_CLEAR:
+        return WGPULoadOp_Clear;
+    default:
+        return WGPULoadOp_Clear;
+    }
+}
+
+static WGPUStoreOp SDLToWGPUStoreOp(SDL_GPUStoreOp storeOp)
+{
+    switch (storeOp) {
+    case SDL_GPU_STOREOP_STORE:
+        return WGPUStoreOp_Store;
+    case SDL_GPU_STOREOP_DONT_CARE:
+        return WGPUStoreOp_Discard;
+    default:
+        return WGPUStoreOp_Store;
+    }
+}
+
+void WebGPU_BeginRenderPass(SDL_GPUCommandBuffer *commandBuffer,
+                            SDL_GPUColorAttachmentInfo *colorAttachmentInfos,
+                            Uint32 colorAttachmentCount,
+                            SDL_GPUDepthStencilAttachmentInfo *depthStencilAttachmentInfo)
+{
+    WebGPUCommandBuffer *webgpuCommandBuffer = (WebGPUCommandBuffer *)commandBuffer;
+    WebGPURenderer *renderer = webgpuCommandBuffer->renderer;
+    WGPURenderPassDescriptor renderPassDesc = { 0 };
+    WebGPUTexture *texture = NULL;
+
+    if (colorAttachmentCount == 0) {
+        SDL_LogError(SDL_LOG_CATEGORY_GPU, "No color attachments provided for render pass");
+        return;
+    }
+
+    WGPURenderPassColorAttachment *colorAttachments = SDL_calloc(colorAttachmentCount,
+                                                                 sizeof(WGPURenderPassColorAttachment) * colorAttachmentCount);
+    for (Uint32 i = 0; i < colorAttachmentCount; i += 1) {
+        texture = (WebGPUTexture *)colorAttachmentInfos[i].texture;
+        colorAttachments[i] = (WGPURenderPassColorAttachment){
+            .view = texture->isMSAAColorTarget
+                        ? wgpuSwapChainGetCurrentTextureView(renderer->claimedWindows[0]->swapchainData->swapchain)
+                        : texture->fullView,
+            .depthSlice = ~0u,
+            .loadOp = SDLToWGPULoadOp(colorAttachmentInfos[i].loadOp),
+            .storeOp = SDLToWGPUStoreOp(colorAttachmentInfos[i].storeOp),
+            .clearValue = (WGPUColor){
+                .r = colorAttachmentInfos[i].clearColor.r,
+                .g = colorAttachmentInfos[i].clearColor.g,
+                .b = colorAttachmentInfos[i].clearColor.b,
+                .a = colorAttachmentInfos[i].clearColor.a,
+            },
+        };
+
+        if (texture->isMSAAColorTarget) {
+            colorAttachments[i].resolveTarget = texture->fullView;
+        }
+
+        SDL_Log("WebGPU: Color attachment color: %f, %f, %f, %f\n",
+               colorAttachments[i].clearValue.r,
+               colorAttachments[i].clearValue.g,
+               colorAttachments[i].clearValue.b,
+               colorAttachments[i].clearValue.a);
+    }
+
+    // Set color attachments
+    renderPassDesc.colorAttachments = colorAttachments;
+    renderPassDesc.colorAttachmentCount = colorAttachmentCount;
+
+    // Set depth stencil attachment if provided
+    if (depthStencilAttachmentInfo != NULL) {
+        // Get depth texture as WebGPUTexture
+        texture = (WebGPUTexture *)depthStencilAttachmentInfo->texture;
+        WGPURenderPassDepthStencilAttachment depthStencilAttachment = {
+            .view = texture->fullView,
+            .depthLoadOp = SDLToWGPULoadOp(depthStencilAttachmentInfo->stencilLoadOp),
+            .depthStoreOp = SDLToWGPUStoreOp(depthStencilAttachmentInfo->stencilStoreOp),
+            .depthClearValue = depthStencilAttachmentInfo->depthStencilClearValue.depth,
+            .stencilLoadOp = SDLToWGPULoadOp(depthStencilAttachmentInfo->stencilLoadOp),
+            .stencilStoreOp = SDLToWGPUStoreOp(depthStencilAttachmentInfo->stencilStoreOp),
+            .stencilClearValue = depthStencilAttachmentInfo->depthStencilClearValue.stencil,
+        };
+
+        renderPassDesc.depthStencilAttachment = &depthStencilAttachment;
+    }
+
+    // Begin the render pass
+    webgpuCommandBuffer->renderPassEncoder = wgpuCommandEncoderBeginRenderPass(webgpuCommandBuffer->commandEncoder, &renderPassDesc);
+    SDL_free(colorAttachments);
+}
+
+void WebGPU_EndRenderPass(SDL_GPUCommandBuffer *commandBuffer)
+{
+    WebGPUCommandBuffer *webgpuCommandBuffer = (WebGPUCommandBuffer *)commandBuffer;
+    wgpuRenderPassEncoderEnd(webgpuCommandBuffer->renderPassEncoder);
+}
+
 static bool WebGPU_INTERNAL_CreateSwapchain(WebGPURenderer *renderer, WindowData *windowData)
 {
     bool hasValidSwapchainComposition, hasValidPresentMode;
@@ -362,6 +526,8 @@ static bool WebGPU_INTERNAL_CreateSwapchain(WebGPURenderer *renderer, WindowData
 
     // Create the surface for the browser swapchain
     SDL_assert(_this && WebGPU_CreateSurface(renderer, windowData));
+
+    SDL_Log("WebGPU: Creating swapchain for window %p", windowData->window);
 
     switch (windowData->swapchainComposition) {
     case SDL_GPU_SWAPCHAINCOMPOSITION_SDR:
@@ -449,9 +615,98 @@ static bool WebGPU_INTERNAL_CreateSwapchain(WebGPURenderer *renderer, WindowData
     swapchainData->textureContainers[0].textureHandles[0]->webgpuTexture->handle = swapchainData->textureContainers[0].textureHandles[0];
     swapchainData->textureContainers[0].textureHandles[0]->container = &swapchainData->textureContainers[0];
     swapchainData->textureContainers[0].textureHandles[0]->webgpuTexture->markedForDestroy = 0;
-    swapchainData->textureContainers[0].textureHandles[0]->webgpuTexture->referenceCount = (SDL_AtomicInt){1};
+    swapchainData->textureContainers[0].textureHandles[0]->webgpuTexture->referenceCount = (SDL_AtomicInt){ 1 };
+
+    // Set the resize callback for the window to recreate the swapchain
+    /*emscripten_set_resize_callback(EMSCRIPTEN_EVENT_TARGET_WINDOW, windowData, true,*/
+    /*                               emsc_window_resize_callback);*/
 
     return true;
+}
+
+static void WebGPU_INTERNAL_DestroySwapchain(WebGPURenderer *renderer, WindowData *windowData)
+{
+    if (windowData->swapchainData) {
+        WebGPUSwapchainData *swapchainData = windowData->swapchainData;
+        if (swapchainData->swapchain) {
+            wgpuSwapChainRelease(swapchainData->swapchain);
+            swapchainData->swapchain = NULL;
+        }
+        if (swapchainData->surface) {
+            wgpuSurfaceRelease(swapchainData->surface);
+            swapchainData->surface = NULL;
+        }
+        if (swapchainData->textureContainers) {
+            for (Uint32 i = 0; i < swapchainData->textureCount; i += 1) {
+                if (swapchainData->textureContainers[i].textureHandles) {
+                    for (Uint32 j = 0; j < swapchainData->textureContainers[i].textureCount; j += 1) {
+                        if (swapchainData->textureContainers[i].textureHandles[j]) {
+                            if (swapchainData->textureContainers[i].textureHandles[j]->webgpuTexture) {
+                                SDL_free(swapchainData->textureContainers[i].textureHandles[j]->webgpuTexture);
+                            }
+                            SDL_free(swapchainData->textureContainers[i].textureHandles[j]);
+                        }
+                    }
+                    SDL_free(swapchainData->textureContainers[i].textureHandles);
+                }
+            }
+            SDL_free(swapchainData->textureContainers);
+        }
+        SDL_free(swapchainData);
+        windowData->swapchainData = NULL;
+    }
+}
+
+static void WebGPU_INTERNAL_RecreateSwapchain(WebGPURenderer *renderer, WindowData *windowData)
+{
+    WebGPU_INTERNAL_DestroySwapchain(renderer, windowData);
+    WebGPU_INTERNAL_CreateSwapchain(renderer, windowData);
+}
+
+static SDL_GPUTexture *WebGPU_AcquireSwapchainTexture(
+    SDL_GPUCommandBuffer *commandBuffer,
+    SDL_Window *window,
+    Uint32 *pWidth,
+    Uint32 *pHeight)
+{
+    WebGPUCommandBuffer *webgpuCommandBuffer = (WebGPUCommandBuffer *)commandBuffer;
+    WebGPURenderer *renderer = (WebGPURenderer *)webgpuCommandBuffer->renderer;
+    WindowData *windowData = WebGPU_INTERNAL_FetchWindowData(window);
+    WebGPUSwapchainData *swapchainData = windowData->swapchainData;
+    WebGPUTexture *texture = swapchainData->textureContainers[0].textureHandles[0]->webgpuTexture;
+
+    // Check if the swapchain needs to be recreated
+    if (windowData->needsSwapchainRecreate) {
+        WebGPU_INTERNAL_RecreateSwapchain(renderer, windowData);
+        swapchainData = windowData->swapchainData;
+
+        if (swapchainData == NULL) {
+            SDL_LogWarn(SDL_LOG_CATEGORY_GPU, "Failed to recreate swapchain!");
+            return NULL;
+        }
+    }
+
+    // Release the previous texture view if it exists
+    if (texture->fullView) {
+        wgpuTextureViewRelease(texture->fullView);
+    }
+
+    // Get the current texture view from the swapchain
+    texture->fullView = wgpuSwapChainGetCurrentTextureView(swapchainData->swapchain);
+    if (texture->fullView == NULL) {
+        SDL_LogWarn(SDL_LOG_CATEGORY_GPU, "Failed to acquire texture view from swapchain!");
+        return NULL;
+    }
+
+    // Set the width and height if provided
+    if (pWidth) {
+        *pWidth = texture->dimensions.width;
+    }
+    if (pHeight) {
+        *pHeight = texture->dimensions.height;
+    }
+
+    return (SDL_GPUTexture *)texture;
 }
 
 static bool WebGPU_ClaimWindow(
@@ -480,7 +735,7 @@ static bool WebGPU_ClaimWindow(
             renderer->claimedWindows[renderer->claimedWindowCount] = windowData;
             renderer->claimedWindowCount += 1;
 
-            /*SDL_AddEventWatch(WebGPU_INTERNAL_OnWindowResize, window);*/
+            SDL_AddEventWatch(WebGPU_INTERNAL_OnWindowResize, window);
 
             return true;
         } else {
@@ -496,6 +751,8 @@ static bool WebGPU_ClaimWindow(
 
 static bool WebGPU_PrepareDriver(SDL_VideoDevice *_this)
 {
+    // Realistically, we should check if the browser supports WebGPU here and return false if it doesn't
+    // For now, we'll just return true because it'll simply crash if the browser doesn't support WebGPU anyways
     return true;
 }
 
@@ -522,8 +779,12 @@ static SDL_GPUDevice *WebGPU_CreateDevice(SDL_bool debug, bool preferLowPower, S
 
     renderer->adapter_semaphore = SDL_CreateSemaphore(0);
 
-    // Request adapter using the instance and then the device using the adapter
-    WGPURequestAdapterOptions adapter_options = { 0 };
+    WGPURequestAdapterOptions adapter_options = {
+        .powerPreference = preferLowPower ? WGPUPowerPreference_LowPower : WGPUPowerPreference_HighPerformance,
+        .backendType = WGPUBackendType_WebGPU
+    };
+
+    // Request adapter using the instance and then the device using the adapter (this is done in the callback)
     wgpuInstanceRequestAdapter(renderer->instance, &adapter_options, WebGPU_RequestAdapterCallback, renderer);
 
     // This seems to be necessary to ensure that the device is created before continuing
@@ -538,7 +799,11 @@ static SDL_GPUDevice *WebGPU_CreateDevice(SDL_bool debug, bool preferLowPower, S
     SDL_WaitSemaphore(renderer->adapter_semaphore);
 
     /*// Set our error callback for emscripten*/
-    wgpuDeviceSetUncapturedErrorCallback(renderer->device, WebGPU_ErrorCallback, NULL);
+    wgpuDeviceSetUncapturedErrorCallback(renderer->device, WebGPU_ErrorCallback, 0);
+    wgpuDevicePushErrorScope(renderer->device, WGPUErrorFilter_Validation);
+
+    // Acquire the queue from the device
+    renderer->queue = wgpuDeviceGetQueue(renderer->device);
 
     result = (SDL_GPUDevice *)SDL_malloc(sizeof(SDL_GPUDevice));
     /*
@@ -552,6 +817,11 @@ static SDL_GPUDevice *WebGPU_CreateDevice(SDL_bool debug, bool preferLowPower, S
     /*ASSIGN_DRIVER(WebGPU)*/
     result->ClaimWindow = WebGPU_ClaimWindow;
     result->driverData = (SDL_GPURenderer *)renderer;
+    result->AcquireCommandBuffer = WebGPU_AcquireCommandBuffer;
+    result->AcquireSwapchainTexture = WebGPU_AcquireSwapchainTexture;
+    result->Submit = WebGPU_Submit;
+    result->BeginRenderPass = WebGPU_BeginRenderPass;
+    result->EndRenderPass = WebGPU_EndRenderPass;
 
     SDL_Log("WebGPU driver created successfully");
 
