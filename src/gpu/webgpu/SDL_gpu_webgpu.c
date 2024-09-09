@@ -98,7 +98,6 @@ struct WebGPUBufferContainer
 };
 
 // Texture structures
-
 typedef struct WebGPUTextureHandle
 {
     WebGPUTexture *webgpuTexture;
@@ -427,7 +426,6 @@ void WebGPU_BeginRenderPass(SDL_GPUCommandBuffer *commandBuffer,
                             SDL_GPUDepthStencilAttachmentInfo *depthStencilAttachmentInfo)
 {
     WebGPUCommandBuffer *webgpuCommandBuffer = (WebGPUCommandBuffer *)commandBuffer;
-    WebGPURenderer *renderer = webgpuCommandBuffer->renderer;
     WebGPUTexture *texture = NULL;
 
     if (colorAttachmentCount == 0) {
@@ -515,6 +513,10 @@ static void WebGPU_CreateSwapchain(WebGPURenderer *renderer, WindowData *windowD
     swapchainData->format = wgpuSurfaceGetPreferredFormat(swapchainData->surface, renderer->adapter);
     swapchainData->presentMode = SDLToWGPUPresentMode(windowData->presentMode);
 
+    // Swapchain should be the size of whatever SDL_Window it is attached to
+    swapchainData->width = windowData->window->w;
+    swapchainData->height = windowData->window->h;
+
     // Emscripten WebGPU swapchain
     WGPUSwapChainDescriptor swapchainDesc = {
         .usage = WGPUTextureUsage_RenderAttachment,
@@ -560,7 +562,7 @@ static void WebGPU_CreateSwapchain(WebGPURenderer *renderer, WindowData *windowD
         swapchainData->msaaView = wgpuTextureCreateView(swapchainData->msaaTexture, NULL);
     }
 
-    SDL_Log("WebGPU: Created swapchain %p for window %p", windowData->swapchainData->swapchain, windowData->window);
+    SDL_Log("WebGPU: Created swapchain %p of size %dx%d", swapchainData->swapchain, swapchainData->width, swapchainData->height);
 }
 
 static void WebGPU_DestroySwapchain(WebGPUSwapchainData *swapchainData)
@@ -719,8 +721,6 @@ static SDL_GPUDevice *WebGPU_CreateDevice(SDL_bool debug, bool preferLowPower, S
     WebGPURenderer *renderer;
     SDL_GPUDevice *result = NULL;
 
-    SDL_Log("Creating WebGPU device");
-
     // Allocate memory for the renderer and device
     renderer = (WebGPURenderer *)SDL_malloc(sizeof(WebGPURenderer));
     memset(renderer, '\0', sizeof(WebGPURenderer));
@@ -782,8 +782,6 @@ static SDL_GPUDevice *WebGPU_CreateDevice(SDL_bool debug, bool preferLowPower, S
     result->Submit = WebGPU_Submit;
     result->BeginRenderPass = WebGPU_BeginRenderPass;
     result->EndRenderPass = WebGPU_EndRenderPass;
-
-    SDL_Log("WebGPU driver created successfully");
 
     return result;
 }

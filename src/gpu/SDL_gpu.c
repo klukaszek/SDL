@@ -448,8 +448,6 @@ SDL_GPUDevice *SDL_CreateGPUDeviceWithProperties(SDL_PropertiesID props)
         return NULL;
     }
 
-    SDL_Log("Video driver: %p", _this);
-
     if (SDL_GetBooleanProperty(props, SDL_PROP_GPU_DEVICE_CREATE_SHADERS_PRIVATE_BOOL, false)) {
         formatFlags |= SDL_GPU_SHADERFORMAT_PRIVATE;
     }
@@ -481,10 +479,8 @@ SDL_GPUDevice *SDL_CreateGPUDeviceWithProperties(SDL_PropertiesID props)
 #endif
     }
 
-    SDL_Log("SDL_CreateGPUDeviceWithProperties: %s", gpudriver ? gpudriver : "???");
     selectedBackend = SDL_GPUSelectBackend(_this, gpudriver, formatFlags);
     if (selectedBackend != SDL_GPU_DRIVER_INVALID) {
-        SDL_Log("Selected GPU driver: %s", gpudriver ? gpudriver : "???");
         for (i = 0; backends[i]; i += 1) {
             if (backends[i]->backendflag == selectedBackend) {
                 result = backends[i]->CreateDevice(debugMode, preferLowPower, props);
