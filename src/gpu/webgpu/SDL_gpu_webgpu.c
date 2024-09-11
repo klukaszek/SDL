@@ -10,6 +10,7 @@
 #include <SDL3/SDL_events.h>
 #include <SDL3/SDL_gpu.h>
 #include <SDL3/SDL_mutex.h>
+#include <SDL3/SDL_oldnames.h>
 #include <SDL3/SDL_properties.h>
 #include <SDL3/SDL_stdinc.h>
 #include <emscripten/emscripten.h>
@@ -247,7 +248,7 @@ typedef struct WebGPURenderer
     Uint32 claimedWindowCount;
     Uint32 claimedWindowCapacity;
 
-    SDL_Semaphore *adapter_semaphore;
+    /*SDL_Semaphore *adapter_semaphore;*/
 } WebGPURenderer;
 
 // Simple Error Callback for WebGPU
@@ -262,7 +263,7 @@ static void WebGPU_RequestDeviceCallback(WGPURequestDeviceStatus status, WGPUDev
     WebGPURenderer *renderer = (WebGPURenderer *)userdata;
     if (status == WGPURequestDeviceStatus_Success) {
         renderer->device = device;
-        SDL_SignalSemaphore(renderer->adapter_semaphore);
+        /*SDL_SignalSemaphore(renderer->adapter_semaphore);*/
         SDL_Log("WebGPU device requested successfully");
     } else {
         SDL_LogError(SDL_LOG_CATEGORY_GPU, "Failed to request WebGPU device: %s", message);
@@ -302,6 +303,11 @@ static WindowData *WebGPU_INTERNAL_FetchWindowData(SDL_Window *window)
 // Callback for when the window is resized
 static SDL_bool WebGPU_INTERNAL_OnWindowResize(void *userdata, SDL_Event *event)
 {
+    // Event watchers will pass any event, but we only care about window resize events
+    if (event->type != SDL_EVENT_WINDOW_RESIZED) {
+        return false;
+    }
+
     SDL_Window *window = (SDL_Window *)userdata;
     WindowData *windowData = WebGPU_INTERNAL_FetchWindowData(window);
     if (windowData) {
@@ -311,14 +317,6 @@ static SDL_bool WebGPU_INTERNAL_OnWindowResize(void *userdata, SDL_Event *event)
     SDL_Log("Window resized, recreating swapchain");
 
     return true;
-}
-
-static EM_BOOL emsc_window_resize_callback(int eventType, const EmscriptenUiEvent *uiEvent, void *userData)
-{
-    (void)eventType;
-    (void)uiEvent;
-    SDL_bool result = WebGPU_INTERNAL_OnWindowResize(userData, NULL);
-    return (EM_BOOL)result;
 }
 
 static SDL_GPUTextureFormat SwapchainCompositionToSDLFormat(
@@ -694,19 +692,51 @@ static bool WebGPU_ClaimWindow(
             renderer->claimedWindows[renderer->claimedWindowCount] = windowData;
             renderer->claimedWindowCount += 1;
 
-            /*SDL_AddEventWatch(WebGPU_INTERNAL_OnWindowResize, window);*/
-            emscripten_set_resize_callback(EMSCRIPTEN_EVENT_TARGET_WINDOW, windowData, true, emsc_window_resize_callback);
-
+            SDL_AddEventWatch(WebGPU_INTERNAL_OnWindowResize, window);
             return true;
         } else {
             SDL_LogError(SDL_LOG_CATEGORY_GPU, "Could not create swapchain, failed to claim window!");
             SDL_free(windowData);
-            return 0;
+            return false;
         }
     } else {
-        SDL_LogWarn(SDL_LOG_CATEGORY_GPU, "Window already claimed!");
-        return 0;
+        SDL_LogError(SDL_LOG_CATEGORY_GPU, "Window already claimed!");
+        return false;
     }
+}
+
+static void WebGPU_ReleaseWindow(SDL_GPURenderer *driverData, SDL_Window *window)
+{
+    WebGPURenderer *renderer = (WebGPURenderer *)driverData;
+
+    if (renderer->claimedWindowCount == 0) {
+        return;
+    }
+
+    WindowData *windowData = WebGPU_INTERNAL_FetchWindowData(window);
+
+    if (windowData == NULL) {
+        return;
+    }
+
+    // Destroy the swapchain
+    if (windowData->swapchainData) {
+        WebGPU_DestroySwapchain(windowData->swapchainData);
+    }
+
+    // Eliminate the window from the claimed windows
+    for (Uint32 i = 0; i < renderer->claimedWindowCount; i += 1) {
+         if (renderer->claimedWindows[i]->window == window) {
+            renderer->claimedWindows[i] = renderer->claimedWindows[renderer->claimedWindowCount - 1];
+            renderer->claimedWindowCount -= 1;
+            break;
+        }
+    }
+
+    // Cleanup
+    SDL_free(windowData);
+    SDL_ClearProperty(SDL_GetWindowProperties(window), WINDOW_PROPERTY_DATA);
+    SDL_RemoveEventWatch(WebGPU_INTERNAL_OnWindowResize, window);
 }
 
 static bool WebGPU_PrepareDriver(SDL_VideoDevice *_this)
@@ -714,6 +744,24 @@ static bool WebGPU_PrepareDriver(SDL_VideoDevice *_this)
     // Realistically, we should check if the browser supports WebGPU here and return false if it doesn't
     // For now, we'll just return true because it'll simply crash if the browser doesn't support WebGPU anyways
     return true;
+}
+
+static void WebGPU_DestroyDevice(SDL_GPUDevice *device)
+{
+    WebGPURenderer *renderer = (WebGPURenderer *)device->driverData;
+
+    // Destroy all claimed windows
+    for (Uint32 i = 0; i < renderer->claimedWindowCount; i += 1) {
+        WebGPU_ReleaseWindow((SDL_GPURenderer *)renderer, renderer->claimedWindows[i]->window);
+    }
+
+    /*// Destroy the device*/
+    /*wgpuDeviceRelease(renderer->device);*/
+    /*wgpuAdapterRelease(renderer->adapter);*/
+    /*wgpuInstanceRelease(renderer->instance);*/
+
+    // Free the renderer
+    SDL_free(renderer);
 }
 
 static SDL_GPUDevice *WebGPU_CreateDevice(SDL_bool debug, bool preferLowPower, SDL_PropertiesID props)
@@ -737,7 +785,7 @@ static SDL_GPUDevice *WebGPU_CreateDevice(SDL_bool debug, bool preferLowPower, S
 
     SDL_LogInfo(SDL_LOG_CATEGORY_GPU, "SDL_GPU Driver: WebGPU");
 
-    renderer->adapter_semaphore = SDL_CreateSemaphore(0);
+    /*renderer->adapter_semaphore = SDL_CreateSemaphore(0);*/
 
     WGPURequestAdapterOptions adapter_options = {
         .powerPreference = WGPUPowerPreference_HighPerformance,
@@ -756,11 +804,13 @@ static SDL_GPUDevice *WebGPU_CreateDevice(SDL_bool debug, bool preferLowPower, S
 
     // I was trying to use SDL_WaitSemaphore here, but it really doesn't seem to work as expected
     // with emscripten, so I'm using emscripten_sleep instead
-    SDL_WaitSemaphore(renderer->adapter_semaphore);
+    /*SDL_WaitSemaphore(renderer->adapter_semaphore);*/
 
     /*// Set our error callback for emscripten*/
     wgpuDeviceSetUncapturedErrorCallback(renderer->device, WebGPU_ErrorCallback, 0);
     wgpuDevicePushErrorScope(renderer->device, WGPUErrorFilter_Validation);
+
+    /*emscripten_set_fullscreenchange_callback(EMSCRIPTEN_EVENT_TARGET_WINDOW, NULL, true, emsc_fullscreen_callback);*/
 
     // Acquire the queue from the device
     renderer->queue = wgpuDeviceGetQueue(renderer->device);
@@ -775,7 +825,9 @@ static SDL_GPUDevice *WebGPU_CreateDevice(SDL_bool debug, bool preferLowPower, S
                ... etc.
     */
     /*ASSIGN_DRIVER(WebGPU)*/
+    result->DestroyDevice = WebGPU_DestroyDevice;
     result->ClaimWindow = WebGPU_ClaimWindow;
+    result->ReleaseWindow = WebGPU_ReleaseWindow;
     result->driverData = (SDL_GPURenderer *)renderer;
     result->AcquireCommandBuffer = WebGPU_AcquireCommandBuffer;
     result->AcquireSwapchainTexture = WebGPU_AcquireSwapchainTexture;
