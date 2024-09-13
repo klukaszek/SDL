@@ -159,6 +159,17 @@ struct WebGPUTextureContainer
     char *debugName;
 };
 
+typedef struct WebGPUShader
+{
+    WGPUShaderModule shaderModule;
+    const char *entryPointName;
+    Uint32 samplerCount;
+    Uint32 storageTextureCount;
+    Uint32 storageBufferCount;
+    Uint32 uniformBufferCount;
+    SDL_AtomicInt referenceCount;
+} WebGPUShader;
+
 // Swapchain structures
 
 typedef struct SwapchainSupportDetails
@@ -1104,20 +1115,40 @@ static SDL_GPUShader *WebGPU_CreateShader(
     SDL_assert(shaderCreateInfo && "Shader create info must not be NULL when creating a shader");
 
     WebGPURenderer *renderer = (WebGPURenderer *)driverData;
+    WebGPUShader *shader = SDL_calloc(1, sizeof(WebGPUShader));
 
     WGPUShaderModuleSPIRVDescriptor spirv_desc = {
-        .chain.sType = WGPUSType_ShaderModuleSPIRVDescriptor,
+        .chain = {
+            .next = NULL,
+            .sType = WGPUSType_ShaderModuleSPIRVDescriptor,
+        },
         .code = (uint32_t *)shaderCreateInfo->code,
         .codeSize = shaderCreateInfo->codeSize,
     };
 
     WGPUShaderModuleDescriptor shader_desc = {
         .nextInChain = (WGPUChainedStruct *)&spirv_desc,
-        .label = "SDL_GPU WebGPU Shader",
     };
 
-    WGPUShaderModule shader_module = wgpuDeviceCreateShaderModule(renderer->device, &shader_desc);
-    return (SDL_GPUShader *)shader_module;
+    // Create a WebGPUShader object to cast to SDL_GPUShader *
+    uint32_t entryPointNameLength = SDL_strlen(shaderCreateInfo->entryPointName) + 1;
+    shader->entryPointName = SDL_malloc(entryPointNameLength);
+    SDL_utf8strlcpy((char *)shader->entryPointName, shaderCreateInfo->entryPointName, entryPointNameLength);
+    shader->samplerCount = shaderCreateInfo->samplerCount;
+    shader->storageBufferCount = shaderCreateInfo->storageBufferCount;
+    shader->uniformBufferCount = shaderCreateInfo->uniformBufferCount;
+    shader->shaderModule = wgpuDeviceCreateShaderModule(renderer->device, &shader_desc);
+
+    SDL_Log("Shader Created Successfully:");
+    SDL_Log("entry: %s\n", shader->entryPointName);
+    SDL_Log("sampler count: %u\n", shader->samplerCount);
+    SDL_Log("storageBufferCount: %u\n", shader->storageBufferCount);
+    SDL_Log("uniformBufferCount: %u\n", shader->uniformBufferCount);
+
+    // Set our shader referenceCount to 0 at creation
+    SDL_AtomicSet(&shader->referenceCount, 0);
+
+    return (SDL_GPUShader *)shader;
 }
 
 static void WebGPU_ReleaseShader(
@@ -1127,8 +1158,15 @@ static void WebGPU_ReleaseShader(
     SDL_assert(driverData && "Driver data must not be NULL when destroying a shader");
     SDL_assert(shader && "Shader must not be NULL when destroying a shader");
 
+    WebGPUShader *wgpuShader = (WebGPUShader *)shader;
+
+    // Free entry function string
+    SDL_free((void *)wgpuShader->entryPointName);
+
     // Release the shader module
-    wgpuShaderModuleRelease((WGPUShaderModule)shader);
+    wgpuShaderModuleRelease(wgpuShader->shaderModule);
+
+    SDL_free(shader);
 }
 
 static void WebGPU_DestroyShader(
@@ -1138,8 +1176,15 @@ static void WebGPU_DestroyShader(
     SDL_assert(driverData && "Driver data must not be NULL when destroying a shader");
     SDL_assert(shader && "Shader must not be NULL when destroying a shader");
 
+    WebGPUShader *wgpuShader = (WebGPUShader *)shader;
+
+    // Free entry function string
+    SDL_free((void *)wgpuShader->entryPointName);
+
     // Release the shader module
-    wgpuShaderModuleRelease((WGPUShaderModule)shader);
+    wgpuShaderModuleRelease(wgpuShader->shaderModule);
+
+    SDL_free(shader);
 }
 
 static SDL_GPUGraphicsPipeline *WebGPU_CreateGraphicsPipeline(
@@ -1159,9 +1204,10 @@ static SDL_GPUGraphicsPipeline *WebGPU_CreateGraphicsPipeline(
     };
     WGPUPipelineLayout pipelineLayout = wgpuDeviceCreatePipelineLayout(renderer->device, &layoutDesc);
 
+    WebGPUShader *vertShader = (WebGPUShader *)pipelineCreateInfo->vertexShader;
     // Create the vertex state for the render pipeline
     WGPUVertexState vertexState = {
-        .module = (WGPUShaderModule)pipelineCreateInfo->vertexShader,
+        .module = vertShader->shaderModule,
         .entryPoint = "main",
         .bufferCount = pipelineCreateInfo->vertexInputState.vertexBindingCount,
         .buffers = NULL, // TODO: Create an array of WGPUVertexBufferLayout for each vertex binding.
@@ -1192,9 +1238,10 @@ static SDL_GPUGraphicsPipeline *WebGPU_CreateGraphicsPipeline(
         };
     }
 
+    WebGPUShader *fragShader = (WebGPUShader *)pipelineCreateInfo->fragmentShader;
     // Create the fragment state for the render pipeline
     WGPUFragmentState fragmentState = {
-        .module = (WGPUShaderModule)pipelineCreateInfo->fragmentShader,
+        .module = fragShader->shaderModule,
         .entryPoint = "main",
         .constantCount = 0,
         .constants = NULL,
@@ -1249,6 +1296,29 @@ static SDL_GPUGraphicsPipeline *WebGPU_CreateGraphicsPipeline(
     SDL_free(colorTargets);
 
     return (SDL_GPUGraphicsPipeline *)pipeline;
+}
+
+static void WebGPU_BindGraphicsPipeline(
+    SDL_GPUCommandBuffer *commandBuffer,
+    SDL_GPUGraphicsPipeline *graphicsPipeline)
+{
+
+    WebGPUCommandBuffer *cmd_buffer = (WebGPUCommandBuffer *)commandBuffer;
+    WebGPURenderer *renderer = (WebGPURenderer *)cmd_buffer->renderer;
+}
+
+static void WebGPU_DrawPrimitives(
+    SDL_GPUCommandBuffer *commandBuffer,
+    Uint32 vertexCount,
+    Uint32 instanceCount,
+    Uint32 firstVertex,
+    Uint32 firstInstance)
+{
+    WebGPUCommandBuffer *wgpuCommandBuffer = (WebGPUCommandBuffer *)commandBuffer;
+
+    // TODO: I need to implement some kind of descriptor set system to ensure that we can bind all necessary data before proceeding with the RenderPass. Too tired to do this on a plane.
+
+    wgpuRenderPassEncoderDraw(wgpuCommandBuffer->renderPassEncoder, vertexCount, instanceCount, firstVertex, firstInstance);
 }
 
 static bool WebGPU_PrepareDriver(SDL_VideoDevice *_this)
@@ -1347,6 +1417,8 @@ static SDL_GPUDevice *WebGPU_CreateDevice(SDL_bool debug, bool preferLowPower, S
     result->CreateShader = WebGPU_CreateShader;
     result->ReleaseShader = WebGPU_ReleaseShader;
     result->CreateGraphicsPipeline = WebGPU_CreateGraphicsPipeline;
+    result->DrawPrimitives = WebGPU_DrawPrimitives;
+    result->BindGraphicsPipeline = WebGPU_BindGraphicsPipeline;
     result->Submit = WebGPU_Submit;
     result->BeginRenderPass = WebGPU_BeginRenderPass;
     result->EndRenderPass = WebGPU_EndRenderPass;
