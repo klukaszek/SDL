@@ -871,10 +871,6 @@ static void WebGPU_CreateSwapchain(WebGPURenderer *renderer, WindowData *windowD
         .presentMode = swapchainData->presentMode,
     };
 
-    emscripten_sleep(1000);
-
-    wgpuDevicePopErrorScope(renderer->device, WebGPU_ErrorCallback, renderer);
-
     swapchainData->swapchain = wgpuDeviceCreateSwapChain(renderer->device, swapchainData->surface, &swapchainDesc);
 
     // Depth/stencil texture for swapchain
