@@ -826,7 +826,7 @@ void WebGPU_EndRenderPass(SDL_GPUCommandBuffer *commandBuffer)
     wgpuRenderPassEncoderRelease(webgpuCommandBuffer->renderPassEncoder);
 }
 
-static bool WebGPU_CreateSurface(WebGPURenderer *renderer, WindowData *windowData)
+bool WebGPU_INTERNAL_CreateSurface(WebGPURenderer *renderer, WindowData *windowData)
 {
     WGPUSurfaceDescriptorFromCanvasHTMLSelector canvas_desc = {
         .chain.sType = WGPUSType_SurfaceDescriptorFromCanvasHTMLSelector,
@@ -843,7 +843,16 @@ static void WebGPU_CreateSwapchain(WebGPURenderer *renderer, WindowData *windowD
 {
     windowData->swapchainData = SDL_calloc(1, sizeof(WebGPUSwapchainData));
 
-    SDL_assert(WebGPU_CreateSurface(renderer, windowData));
+    SDL_assert(WebGPU_INTERNAL_CreateSurface(renderer, windowData));
+
+    WGPUSurfaceDescriptorFromCanvasHTMLSelector canvas_desc = {
+        .chain.sType = WGPUSType_SurfaceDescriptorFromCanvasHTMLSelector,
+        .selector = "#canvas",
+    };
+    WGPUSurfaceDescriptor surf_desc = {
+        .nextInChain = &canvas_desc.chain,
+    };
+    windowData->swapchainData->surface = wgpuInstanceCreateSurface(renderer->instance, &surf_desc);
 
     WebGPUSwapchainData *swapchainData = windowData->swapchainData;
     swapchainData->format = wgpuSurfaceGetPreferredFormat(swapchainData->surface, renderer->adapter);
@@ -861,6 +870,10 @@ static void WebGPU_CreateSwapchain(WebGPURenderer *renderer, WindowData *windowD
         .height = swapchainData->height,
         .presentMode = swapchainData->presentMode,
     };
+
+    emscripten_sleep(1000);
+
+    wgpuDevicePopErrorScope(renderer->device, WebGPU_ErrorCallback, renderer);
 
     swapchainData->swapchain = wgpuDeviceCreateSwapChain(renderer->device, swapchainData->surface, &swapchainDesc);
 
