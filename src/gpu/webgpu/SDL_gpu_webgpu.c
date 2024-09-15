@@ -1416,9 +1416,15 @@ static SDL_GPUDevice *WebGPU_CreateDevice(SDL_bool debug, bool preferLowPower, S
     result->GetSwapchainTextureFormat = WebGPU_GetSwapchainTextureFormat;
     result->CreateShader = WebGPU_CreateShader;
     result->ReleaseShader = WebGPU_ReleaseShader;
+
+    // TODO START (finish the implementation of these functions)
+
     result->CreateGraphicsPipeline = WebGPU_CreateGraphicsPipeline;
     result->DrawPrimitives = WebGPU_DrawPrimitives;
     result->BindGraphicsPipeline = WebGPU_BindGraphicsPipeline;
+
+    // TODO END
+
     result->Submit = WebGPU_Submit;
     result->BeginRenderPass = WebGPU_BeginRenderPass;
     result->EndRenderPass = WebGPU_EndRenderPass;
