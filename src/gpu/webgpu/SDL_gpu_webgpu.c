@@ -7,7 +7,6 @@
 
 #include "../SDL_sysgpu.h"
 #include "SDL_internal.h"
-#include <spirv_cross_c.h>
 #include <SDL3/SDL_events.h>
 #include <SDL3/SDL_gpu.h>
 #include <SDL3/SDL_mutex.h>
@@ -16,6 +15,7 @@
 #include <SDL3/SDL_stdinc.h>
 #include <emscripten/emscripten.h>
 #include <emscripten/html5.h>
+#include <spirv_cross_c.h>
 #include <stdint.h>
 #include <webgpu/webgpu.h>
 
@@ -1581,7 +1581,8 @@ static SDL_GPUShader *WebGPU_CreateShader(
 
     // Create a WebGPUShader object to cast to SDL_GPUShader *
     uint32_t entryPointNameLength = SDL_strlen(shaderCreateInfo->entryPointName) + 1;
-    shader->spirv = (uint32_t *)shaderCreateInfo->code;
+    shader->spirv = SDL_malloc(shaderCreateInfo->codeSize);
+    memcpy(shader->spirv, shaderCreateInfo->code, shaderCreateInfo->codeSize);
     shader->spirvSize = shaderCreateInfo->codeSize;
     shader->entryPointName = SDL_malloc(entryPointNameLength);
     SDL_utf8strlcpy((char *)shader->entryPointName, shaderCreateInfo->entryPointName, entryPointNameLength);
@@ -1613,6 +1614,7 @@ static void WebGPU_ReleaseShader(
 
     // Free entry function string
     SDL_free((void *)wgpuShader->entryPointName);
+    SDL_free((void *)wgpuShader->spirv);
 
     // Release the shader module
     wgpuShaderModuleRelease(wgpuShader->shaderModule);
@@ -1660,13 +1662,24 @@ static SDL_GPUGraphicsPipeline *WebGPU_CreateGraphicsPipeline(
                                                                         fragShader->spirvSize,
                                                                         WGPUShaderStage_Fragment, &fragmentBindGroupCount);
 
+    WebGPUPipelineResourceLayout *resourceLayout = CreateResourceLayoutFromReflection(renderer, vertexBindGroups, vertexBindGroupCount, fragmentBindGroups, fragmentBindGroupCount);
+
     // Create the pipeline layout
     WGPUPipelineLayoutDescriptor layoutDesc = {
         .label = "SDL_GPU WebGPU Pipeline Layout",
-        .bindGroupLayoutCount = 0,
-        .bindGroupLayouts = NULL, // TODO: Create BindGroupLayouts appropriate for the shader
+        .bindGroupLayoutCount = resourceLayout->bindGroupLayoutCount,
+        .bindGroupLayouts = SDL_malloc(sizeof(WGPUBindGroupLayout) * resourceLayout->bindGroupLayoutCount),
     };
+
+    // Assign the bind group layouts to the pipeline layout
+    for (uint32_t i = 0; i < resourceLayout->bindGroupLayoutCount; i++) {
+        memcpy(layoutDesc.bindGroupLayouts[i], &resourceLayout->bindGroupLayouts[i].layout, sizeof(WGPUBindGroupLayout));
+    }
+
+    // Create the pipeline layout from the descriptor
     WGPUPipelineLayout pipelineLayout = wgpuDeviceCreatePipelineLayout(renderer->device, &layoutDesc);
+
+    resourceLayout->pipelineLayout = pipelineLayout;
 
     // Create the vertex state for the render pipeline
     WGPUVertexState vertexState = {
@@ -1749,17 +1762,29 @@ static SDL_GPUGraphicsPipeline *WebGPU_CreateGraphicsPipeline(
     // Create the WebGPU render pipeline from the descriptor
     WGPURenderPipeline wgpuPipeline = wgpuDeviceCreateRenderPipeline(renderer->device, &pipelineDesc);
 
-    // Release the pipeline layout once our pipeline is created
-    wgpuPipelineLayoutRelease(pipelineLayout);
-
-    // Free the color targets
-    SDL_free(colorTargets);
-
     pipeline->pipeline = wgpuPipeline;
     pipeline->pipelineDesc = pipelineDesc;
     pipeline->vertexShader = vertShader;
     pipeline->fragmentShader = fragShader;
     pipeline->primitiveType = pipelineCreateInfo->primitiveType;
+
+    SDL_AtomicSet(&pipeline->referenceCount, 1);
+
+    // Clean up
+    SDL_free(colorTargets);
+    SDL_free(((void *)layoutDesc.bindGroupLayouts));
+    wgpuPipelineLayoutRelease(pipelineLayout);
+    SDL_free(resourceLayout);
+
+    // Free reflected bind groups
+    for (uint32_t i = 0; i < vertexBindGroupCount; i++) {
+        SDL_free(vertexBindGroups[i].bindings);
+    }
+    SDL_free(vertexBindGroups);
+    for (uint32_t i = 0; i < fragmentBindGroupCount; i++) {
+        SDL_free(fragmentBindGroups[i].bindings);
+    }
+    SDL_free(fragmentBindGroups);
 
     return (SDL_GPUGraphicsPipeline *)pipeline;
 }
