@@ -1582,7 +1582,7 @@ static SDL_GPUShader *WebGPU_CreateShader(
     // Create a WebGPUShader object to cast to SDL_GPUShader *
     uint32_t entryPointNameLength = SDL_strlen(shaderCreateInfo->entryPointName) + 1;
     shader->spirv = SDL_malloc(shaderCreateInfo->codeSize);
-    memcpy(shader->spirv, shaderCreateInfo->code, shaderCreateInfo->codeSize);
+    SDL_memcpy(shader->spirv, shaderCreateInfo->code, shaderCreateInfo->codeSize);
     shader->spirvSize = shaderCreateInfo->codeSize;
     shader->entryPointName = SDL_malloc(entryPointNameLength);
     SDL_utf8strlcpy((char *)shader->entryPointName, shaderCreateInfo->entryPointName, entryPointNameLength);
@@ -1673,7 +1673,7 @@ static SDL_GPUGraphicsPipeline *WebGPU_CreateGraphicsPipeline(
 
     // Assign the bind group layouts to the pipeline layout
     for (uint32_t i = 0; i < resourceLayout->bindGroupLayoutCount; i++) {
-        memcpy(layoutDesc.bindGroupLayouts[i], &resourceLayout->bindGroupLayouts[i].layout, sizeof(WGPUBindGroupLayout));
+        SDL_memcpy(layoutDesc.bindGroupLayouts[i], &resourceLayout->bindGroupLayouts[i].layout, sizeof(WGPUBindGroupLayout));
     }
 
     // Create the pipeline layout from the descriptor
