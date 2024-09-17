@@ -1499,25 +1499,46 @@ elseif(EMSCRIPTEN)
     if(SDL_GPU)
       set(SDL_WEBGPU ON)
       set(SDL_RENDER_WEBGPU ON)
+      set(SPIRV_CROSS_EMSC ${SDL3_SOURCE_DIR}/SPIRV-Cross/build)
+
+      if (NOT EXISTS ${SDL3_SOURCE_DIR}/SPIRV-Cross/build)
+        file(MAKE_DIRECTORY ${SDL3_SOURCE_DIR}/SPIRV-Cross/build)
+      endif()
+
+      if (NOT EXISTS ${SDL3_SOURCE_DIR}/SPIRV-Cross/build/CMakeCache.txt)
+        execute_process(
+          COMMAND emcmake cmake ..
+          WORKING_DIRECTORY ${SDL3_SOURCE_DIR}/SPIRV-Cross/build
+        )
+      endif()
+
+      if (NOT EXISTS ${SDL3_SOURCE_DIR}/SPIRV-Cross/build/libspirv-cross-c.a)
+        execute_process(
+          COMMAND emmake make
+          WORKING_DIRECTORY ${SDL3_SOURCE_DIR}/SPIRV-Cross/build
+        )
+      endif()
+
+      add_subdirectory("${SDL3_SOURCE_DIR}/SPIRV-Cross" EXCLUDE_FROM_ALL)
+
       sdl_glob_sources("${SDL3_SOURCE_DIR}/src/gpu/webgpu/*.c")
 
-      # # # We must link against libspirv
-      # set(SPIRV_CROSS_LIBRARIES
-      #     ${SDL3_SOURCE_DIR}/SPIRV-Cross/build/libspirv-cross-c.a
-      #     ${SDL3_SOURCE_DIR}/SPIRV-Cross/build/libspirv-cross-cpp.a
-      #     ${SDL3_SOURCE_DIR}/SPIRV-Cross/build/libspirv-cross-core.a
-      #     ${SDL3_SOURCE_DIR}/SPIRV-Cross/build/libspirv-cross-glsl.a
-      #     ${SDL3_SOURCE_DIR}/SPIRV-Cross/build/libspirv-cross-hlsl.a
-      #     ${SDL3_SOURCE_DIR}/SPIRV-Cross/build/libspirv-cross-msl.a
-      #     ${SDL3_SOURCE_DIR}/SPIRV-Cross/build/libspirv-cross-reflect.a
-      #     ${SDL3_SOURCE_DIR}/SPIRV-Cross/build/libspirv-cross-util.a
-      # )
-      # set(SPIRV_CROSS_INCLUDE_DIRS ${SDL3_SOURCE_DIR}/SPIRV-Cross/)
-      #
-      # sdl_link_dependency(spirv-cross-c LIBS ${SPIRV_CROSS_LIBRARIES})
-      sdl_include_directories(PRIVATE ${SDL3_SOURCE_DIR}/src/gpu/webgpu/shadercross)
-      #
-      # link_directories(${SPIRV_CROSS_LIBRARY_DIRS})
+      # We must link against libspirv-cross for Shader reflection
+      set(SPIRV_CROSS_LIBRARIES
+          ${SPIRV_CROSS_EMSC}/libspirv-cross-c.a
+          ${SPIRV_CROSS_EMSC}/libspirv-cross-cpp.a
+          ${SPIRV_CROSS_EMSC}/libspirv-cross-core.a
+          ${SPIRV_CROSS_EMSC}/libspirv-cross-glsl.a
+          ${SPIRV_CROSS_EMSC}/libspirv-cross-hlsl.a
+          ${SPIRV_CROSS_EMSC}/libspirv-cross-msl.a
+          ${SPIRV_CROSS_EMSC}/libspirv-cross-reflect.a
+          ${SPIRV_CROSS_EMSC}/libspirv-cross-util.a
+      )
+
+      # Link against SPIRV-Cross
+      sdl_link_dependency(spirv-cross-c LIBS ${SPIRV_CROSS_LIBRARIES})
+      sdl_include_directories(PRIVATE ${SDL3_SOURCE_DIR}/SPIRV-Cross)
+      link_directories(${SPIRV_CROSS_LIBRARY_DIRS})
 
       set(HAVE_WEBGPU TRUE)
       set(HAVE_RENDER_WEBGPU TRUE)

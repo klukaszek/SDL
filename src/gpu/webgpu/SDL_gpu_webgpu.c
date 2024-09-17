@@ -7,7 +7,7 @@
 
 #include "../SDL_sysgpu.h"
 #include "SDL_internal.h"
-#include "shadercross/spirv_cross_c.h"
+#include <spirv_cross_c.h>
 #include <SDL3/SDL_events.h>
 #include <SDL3/SDL_gpu.h>
 #include <SDL3/SDL_mutex.h>
