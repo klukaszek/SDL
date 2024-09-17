@@ -1500,6 +1500,25 @@ elseif(EMSCRIPTEN)
       set(SDL_WEBGPU ON)
       set(SDL_RENDER_WEBGPU ON)
       sdl_glob_sources("${SDL3_SOURCE_DIR}/src/gpu/webgpu/*.c")
+
+      # # # We must link against libspirv
+      # set(SPIRV_CROSS_LIBRARIES
+      #     ${SDL3_SOURCE_DIR}/SPIRV-Cross/build/libspirv-cross-c.a
+      #     ${SDL3_SOURCE_DIR}/SPIRV-Cross/build/libspirv-cross-cpp.a
+      #     ${SDL3_SOURCE_DIR}/SPIRV-Cross/build/libspirv-cross-core.a
+      #     ${SDL3_SOURCE_DIR}/SPIRV-Cross/build/libspirv-cross-glsl.a
+      #     ${SDL3_SOURCE_DIR}/SPIRV-Cross/build/libspirv-cross-hlsl.a
+      #     ${SDL3_SOURCE_DIR}/SPIRV-Cross/build/libspirv-cross-msl.a
+      #     ${SDL3_SOURCE_DIR}/SPIRV-Cross/build/libspirv-cross-reflect.a
+      #     ${SDL3_SOURCE_DIR}/SPIRV-Cross/build/libspirv-cross-util.a
+      # )
+      # set(SPIRV_CROSS_INCLUDE_DIRS ${SDL3_SOURCE_DIR}/SPIRV-Cross/)
+      #
+      # sdl_link_dependency(spirv-cross-c LIBS ${SPIRV_CROSS_LIBRARIES})
+      sdl_include_directories(PRIVATE ${SDL3_SOURCE_DIR}/src/gpu/webgpu/shadercross)
+      #
+      # link_directories(${SPIRV_CROSS_LIBRARY_DIRS})
+
       set(HAVE_WEBGPU TRUE)
       set(HAVE_RENDER_WEBGPU TRUE)
     endif()
