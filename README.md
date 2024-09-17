@@ -1,4 +1,4 @@
-# SDL3 WebGPU Branch
+# SDL3 WebGPU Fork
 
 **For more information on building and testing**:
 https://github.com/klukaszek/SDL3-WebGPU-Examples
