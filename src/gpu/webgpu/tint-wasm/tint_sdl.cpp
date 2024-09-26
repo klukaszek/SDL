@@ -78,8 +78,6 @@ std::vector<uint32_t> convertUint8ArrayToUint32Array(const uint8_t *data, size_t
 
 tint::cmd::ProgramInfo LoadProgramInfo(const tint::cmd::LoadProgramOptions &opts, const std::vector<uint32_t> shader_code)
 {
-    tint::Initialize();
-
     auto load = [&]() -> tint::cmd::ProgramInfo {
         return tint::cmd::ProgramInfo{
             /* program */ tint::spirv::reader::Read(shader_code, {}),
@@ -105,6 +103,11 @@ tint::cmd::ProgramInfo LoadProgramInfo(const tint::cmd::LoadProgramOptions &opts
 }
 
 extern "C" {
+
+void tint_initialize(void)
+{
+    tint::Initialize();
+}
 
 char *tint_spv_to_wgsl(const uint8_t *shader_data, const size_t shader_size)
 {

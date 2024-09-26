@@ -21,6 +21,7 @@
 
 /* Tint WASM exported functions START */
 
+void tint_initialize(void);
 const char *tint_spv_to_wgsl(const void *shader_data, const size_t shader_size);
 
 /* Tint WASM exported functions END */
@@ -2072,6 +2073,11 @@ static SDL_GPUDevice *WebGPU_CreateDevice(SDL_bool debug, bool preferLowPower, S
     renderer->queue = wgpuDeviceGetQueue(renderer->device);
 
     result = (SDL_GPUDevice *)SDL_malloc(sizeof(SDL_GPUDevice));
+
+
+    // Initialize Tint for SPIRV to WGSL conversion
+    tint_initialize();
+
     /*
     TODO: Ensure that all function signatures for the driver are correct so that the following line compiles
           This will attach all of the driver's functions to the SDL_GPUDevice struct
