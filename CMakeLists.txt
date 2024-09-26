@@ -184,6 +184,7 @@ set(SDL_STATIC_AVAILABLE ON)
 # All these *_DEFAULT vars will default to ON if not specified,
 # so you only need to override them if they need to be disabled.
 if(EMSCRIPTEN)
+
   # Set up default values for the currently supported set of subsystems:
   # Emscripten/Javascript does not have assembly support, a dynamic library
   # loading architecture, or low-level CPU inspection.
@@ -1539,6 +1540,17 @@ elseif(EMSCRIPTEN)
       sdl_link_dependency(spirv-cross-c LIBS ${SPIRV_CROSS_LIBRARIES})
       sdl_include_directories(PRIVATE ${SDL3_SOURCE_DIR}/SPIRV-Cross)
       link_directories(${SPIRV_CROSS_LIBRARY_DIRS})
+
+      sdl_include_directories(PRIVATE /usr/include/c++/11/)
+      sdl_include_directories(PRIVATE /usr/include/x86_64-linux-gnu/c++/11/)
+      sdl_link_dependency(stdc++ LIBS stdc++)
+
+      # Link against Tint for SPIR-V to WGSL conversion
+      set(TINT_DIR ${SDL3_SOURCE_DIR}/src/gpu/webgpu/tint-wasm/)
+      set(TINT_WASM ${TINT_DIR}/libtint_wasm.a)
+      sdl_link_dependency(tint LIBS ${TINT_WASM})
+      sdl_include_directories(PRIVATE ${TINT_DIR})
+      link_directories(${TINT_DIR})
 
       set(HAVE_WEBGPU TRUE)
       set(HAVE_RENDER_WEBGPU TRUE)

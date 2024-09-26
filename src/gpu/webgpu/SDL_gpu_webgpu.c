@@ -1,6 +1,6 @@
 // File: /webgpu/SDL_gpu_webgpu.c
 // Author: Kyle Lukaszek
-// Email: kylelukaszek at gmail dot com
+// Email: kylelukaszek [at] gmail [dot] com
 // License: Zlib
 // Description: WebGPU driver for SDL_gpu using the emscripten WebGPU implementation
 // Note: Compiling SDL GPU programs using emscripten will require -sUSE_WEBGPU=1 -sASYNCIFY=1
@@ -18,6 +18,12 @@
 #include <spirv_cross_c.h>
 #include <stdint.h>
 #include <webgpu/webgpu.h>
+
+/* Tint WASM exported functions START */
+
+const char *tint_spv_to_wgsl(const void *shader_data, const size_t shader_size);
+
+/* Tint WASM exported functions END */
 
 #define MAX_UBO_SECTION_SIZE          4096 // 4   KiB
 #define DESCRIPTOR_POOL_STARTING_SIZE 128
@@ -1615,6 +1621,12 @@ static SDL_GPUShader *WebGPU_CreateShader(
     WebGPURenderer *renderer = (WebGPURenderer *)driverData;
     WebGPUShader *shader = SDL_calloc(1, sizeof(WebGPUShader));
 
+    const char *wgsl = tint_spv_to_wgsl(shaderCreateInfo->code, shaderCreateInfo->codeSize);
+
+    printf("WGSL: %s", wgsl);
+
+    SDL_free((void *)wgsl);
+
     WGPUShaderModuleSPIRVDescriptor spirv_desc = {
         .chain = {
             .next = NULL,
@@ -1740,16 +1752,16 @@ static SDL_GPUGraphicsPipeline *WebGPU_CreateGraphicsPipeline(
     // Create the vertex state for the render pipeline
     WGPUVertexState vertexState = {
         .module = wgpuDeviceCreateShaderModule(renderer->device, &(WGPUShaderModuleDescriptor){
-            .label = "SDL_GPU WebGPU Vertex Shader",
-            .nextInChain = (void *)&(WGPUShaderModuleSPIRVDescriptor){
-                .chain = {
-                    .next = NULL,
-                    .sType = WGPUSType_ShaderModuleSPIRVDescriptor,
-                },
-                .code = vertShader->spirv,
-                .codeSize = vertShader->spirvSize,
-            },
-        }),
+                                                                     .label = "SDL_GPU WebGPU Vertex Shader",
+                                                                     .nextInChain = (void *)&(WGPUShaderModuleSPIRVDescriptor){
+                                                                         .chain = {
+                                                                             .next = NULL,
+                                                                             .sType = WGPUSType_ShaderModuleSPIRVDescriptor,
+                                                                         },
+                                                                         .code = vertShader->spirv,
+                                                                         .codeSize = vertShader->spirvSize,
+                                                                     },
+                                                                 }),
         .entryPoint = "main",
         .bufferCount = pipelineCreateInfo->vertexInputState.vertexBindingCount,
         .buffers = NULL, // TODO: Create an array of WGPUVertexBufferLayout for each vertex binding.
@@ -2037,7 +2049,7 @@ static SDL_GPUDevice *WebGPU_CreateDevice(SDL_bool debug, bool preferLowPower, S
 
     WGPURequestAdapterOptions adapter_options = {
         .powerPreference = WGPUPowerPreference_HighPerformance,
-        .backendType = WGPUBackendType_WebGPU
+        .backendType = WGPUBackendType_Vulkan,
     };
 
     // Request adapter using the instance and then the device using the adapter (this is done in the callback)
