@@ -1318,6 +1318,7 @@ void WebGPU_BeginRenderPass(SDL_GPUCommandBuffer *commandBuffer,
 
     // Set color attachments for the render pass
     WGPURenderPassDescriptor renderPassDesc = {
+        .label = "SDL_GPU Render Pass",
         .colorAttachmentCount = colorAttachmentCount,
         .colorAttachments = colorAttachments,
     };
@@ -1966,16 +1967,25 @@ void WebGPU_SetScissorRect(SDL_GPUCommandBuffer *renderPass, const SDL_Rect *sci
 
     WebGPUCommandBuffer *commandBuffer = (WebGPUCommandBuffer *)renderPass;
 
+    uint32_t window_width = commandBuffer->renderer->claimedWindows[0]->swapchainData->width;
+    uint32_t window_height = commandBuffer->renderer->claimedWindows[0]->swapchainData->height;
+
+    uint32_t max_scissor_width = window_width - scissorRect->x;
+    uint32_t max_scissor_height = window_height - scissorRect->y;
+
+    uint32_t clamped_width = (scissorRect->w > max_scissor_width) ? max_scissor_width : scissorRect->w;
+    uint32_t clamped_height = (scissorRect->h > max_scissor_height) ? max_scissor_height : scissorRect->h;
+
     commandBuffer->currentScissor = (WebGPURect){
         .x = scissorRect->x,
         .y = scissorRect->y,
-        .width = scissorRect->w,
-        .height = scissorRect->h,
+        .width = clamped_width,
+        .height = clamped_height,
     };
 
-    SDL_Log("Scissor rect: x: %u, y: %u, w: %u, h: %u", commandBuffer->currentScissor.x, commandBuffer->currentScissor.y, commandBuffer->currentScissor.width, commandBuffer->currentScissor.height);
+    SDL_Log("Scissor rect: x: %u, y: %u, w: %u, h: %u", commandBuffer->currentScissor.x, commandBuffer->currentScissor.y, clamped_width, clamped_height);
 
-    wgpuRenderPassEncoderSetScissorRect(commandBuffer->renderPassEncoder, scissorRect->x, scissorRect->y, scissorRect->w, scissorRect->h);
+    wgpuRenderPassEncoderSetScissorRect(commandBuffer->renderPassEncoder, scissorRect->x, scissorRect->y, clamped_width, clamped_height);
 }
 
 static void WebGPU_BindGraphicsPipeline(
@@ -2121,7 +2131,7 @@ static SDL_GPUDevice *WebGPU_CreateDevice(bool debug, bool preferLowPower, SDL_P
     result->AcquireCommandBuffer = WebGPU_AcquireCommandBuffer;
     result->AcquireSwapchainTexture = WebGPU_AcquireSwapchainTexture;
     result->GetSwapchainTextureFormat = WebGPU_GetSwapchainTextureFormat;
-  
+
     result->CreateShader = WebGPU_CreateShader;
     result->ReleaseShader = WebGPU_ReleaseShader;
 
