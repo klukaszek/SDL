@@ -1953,7 +1953,7 @@ void WebGPU_SetViewport(SDL_GPUCommandBuffer *renderPass, const SDL_GPUViewport 
         .maxDepth = viewport->max_depth,
     };
 
-    SDL_Log("Viewport: x: %.2f, y: %.2f, w: %.2f, h: %.2f", commandBuffer->currentViewport.x, commandBuffer->currentViewport.y, commandBuffer->currentViewport.width, commandBuffer->currentViewport.height);
+    /*SDL_Log("Viewport: x: %.2f, y: %.2f, w: %.2f, h: %.2f", commandBuffer->currentViewport.x, commandBuffer->currentViewport.y, commandBuffer->currentViewport.width, commandBuffer->currentViewport.height);*/
 
     // Set the viewport
     wgpuRenderPassEncoderSetViewport(commandBuffer->renderPassEncoder, viewport->x, viewport->y, viewport->w, viewport->h, viewport->min_depth, viewport->max_depth);
@@ -1983,7 +1983,7 @@ void WebGPU_SetScissorRect(SDL_GPUCommandBuffer *renderPass, const SDL_Rect *sci
         .height = clamped_height,
     };
 
-    SDL_Log("Scissor rect: x: %u, y: %u, w: %u, h: %u", commandBuffer->currentScissor.x, commandBuffer->currentScissor.y, clamped_width, clamped_height);
+    /*SDL_Log("Scissor rect: x: %u, y: %u, w: %u, h: %u", commandBuffer->currentScissor.x, commandBuffer->currentScissor.y, clamped_width, clamped_height);*/
 
     wgpuRenderPassEncoderSetScissorRect(commandBuffer->renderPassEncoder, scissorRect->x, scissorRect->y, clamped_width, clamped_height);
 }
