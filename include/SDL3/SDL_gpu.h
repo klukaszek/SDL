@@ -293,6 +293,7 @@ typedef Uint32 SDL_GPUShaderFormat;
 #define SDL_GPU_SHADERFORMAT_DXIL     (1u << 3) /**< DXIL shaders for D3D12 */
 #define SDL_GPU_SHADERFORMAT_MSL      (1u << 4) /**< MSL shaders for Metal */
 #define SDL_GPU_SHADERFORMAT_METALLIB (1u << 5) /**< precompiled metallib shaders for Metal */
+#define SDL_GPU_SHADERFORMAT_WGSL     (1u << 6) /**< WGSL shaders for WebGPU */
 
 typedef enum SDL_GPUVertexElementFormat
 {
