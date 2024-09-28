@@ -15,7 +15,6 @@
 #include <SDL3/SDL_stdinc.h>
 #include <emscripten/emscripten.h>
 #include <emscripten/html5.h>
-#include <stdint.h>
 #include <webgpu/webgpu.h>
 
 #define MAX_UBO_SECTION_SIZE          4096 // 4   KiB
@@ -1292,7 +1291,9 @@ static void WebGPU_RecreateSwapchain(WebGPURenderer *renderer, WindowData *windo
 static bool WebGPU_AcquireSwapchainTexture(
     SDL_GPUCommandBuffer *commandBuffer,
     SDL_Window *window,
-    SDL_GPUTexture **ret_texture)
+    SDL_GPUTexture **ret_texture,
+    Uint32 *ret_width,
+    Uint32 *ret_height)
 {
     WebGPUCommandBuffer *webgpuCommandBuffer = (WebGPUCommandBuffer *)commandBuffer;
     WebGPURenderer *renderer = webgpuCommandBuffer->renderer;
@@ -1436,7 +1437,6 @@ SDL_GPUShader *WebGPU_CreateShader(
     WebGPUShader *shader = SDL_calloc(1, sizeof(WebGPUShader));
 
     const char *wgsl = (const char *)shaderCreateInfo->code;
-
     WGPUShaderModuleWGSLDescriptor wgsl_desc = {
         .chain = {
             .sType = WGPUSType_ShaderModuleWGSLDescriptor,
@@ -1751,8 +1751,6 @@ void WebGPU_SetViewport(SDL_GPUCommandBuffer *renderPass, const SDL_GPUViewport 
         .maxDepth = viewport->max_depth,
     };
 
-    /*SDL_Log("Viewport: x: %.2f, y: %.2f, w: %.2f, h: %.2f", commandBuffer->currentViewport.x, commandBuffer->currentViewport.y, commandBuffer->currentViewport.width, commandBuffer->currentViewport.height);*/
-
     // Set the viewport
     wgpuRenderPassEncoderSetViewport(commandBuffer->renderPassEncoder, viewport->x, viewport->y, viewport->w, viewport->h, viewport->min_depth, viewport->max_depth);
 }
@@ -1780,8 +1778,6 @@ void WebGPU_SetScissorRect(SDL_GPUCommandBuffer *renderPass, const SDL_Rect *sci
         .width = clamped_width,
         .height = clamped_height,
     };
-
-    /*SDL_Log("Scissor rect: x: %u, y: %u, w: %u, h: %u", commandBuffer->currentScissor.x, commandBuffer->currentScissor.y, clamped_width, clamped_height);*/
 
     wgpuRenderPassEncoderSetScissorRect(commandBuffer->renderPassEncoder, scissorRect->x, scissorRect->y, clamped_width, clamped_height);
 }
@@ -1909,7 +1905,7 @@ static SDL_GPUDevice *WebGPU_CreateDevice(bool debug, bool preferLowPower, SDL_P
 
     result = (SDL_GPUDevice *)SDL_malloc(sizeof(SDL_GPUDevice));
 
-       /*
+    /*
     TODO: Ensure that all function signatures for the driver are correct so that the following line compiles
           This will attach all of the driver's functions to the SDL_GPUDevice struct
 
