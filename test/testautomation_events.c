@@ -25,7 +25,7 @@ static int g_userdataValue2 = 2;
 #define MAX_ITERATIONS 100
 
 /* Event filter that sets some flags and optionally checks userdata */
-static SDL_bool SDLCALL events_sampleNullEventFilter(void *userdata, SDL_Event *event)
+static bool SDLCALL events_sampleNullEventFilter(void *userdata, SDL_Event *event)
 {
     g_eventFilterCalled = 1;
 
@@ -36,7 +36,7 @@ static SDL_bool SDLCALL events_sampleNullEventFilter(void *userdata, SDL_Event *
         }
     }
 
-    return SDL_TRUE;
+    return true;
 }
 
 /**
@@ -45,7 +45,7 @@ static SDL_bool SDLCALL events_sampleNullEventFilter(void *userdata, SDL_Event *
  * \sa SDL_PumpEvents
  * \sa SDL_PollEvent
  */
-static int events_pushPumpAndPollUserevent(void *arg)
+static int SDLCALL events_pushPumpAndPollUserevent(void *arg)
 {
     SDL_Event event_in;
     SDL_Event event_out;
@@ -91,8 +91,8 @@ static int events_pushPumpAndPollUserevent(void *arg)
     SDLTest_AssertCheck(SDL_EVENT_USER == event_out.type, "Check event type is SDL_EVENT_USER, expected: 0x%x, got: 0x%" SDL_PRIx32, SDL_EVENT_USER, event_out.type);
     SDLTest_AssertCheck(ref_code == event_out.user.code, "Check SDL_Event.user.code, expected: 0x%" SDL_PRIx32 ", got: 0x%" SDL_PRIx32 , ref_code, event_out.user.code);
     SDLTest_AssertCheck(0 == event_out.user.windowID, "Check SDL_Event.user.windowID, expected: NULL , got: %" SDL_PRIu32, event_out.user.windowID);
-    SDLTest_AssertCheck((void *)&g_userdataValue1 == event_out.user.data1, "Check SDL_Event.user.data1, expected: %p, got: %p", (void *)&g_userdataValue1, event_out.user.data1);
-    SDLTest_AssertCheck((void *)&g_userdataValue2 == event_out.user.data2, "Check SDL_Event.user.data2, expected: %p, got: %p", (void *)&g_userdataValue2, event_out.user.data2);
+    SDLTest_AssertCheck((void *)&g_userdataValue1 == event_out.user.data1, "Check SDL_Event.user.data1, expected: %p, got: %p", &g_userdataValue1, event_out.user.data1);
+    SDLTest_AssertCheck((void *)&g_userdataValue2 == event_out.user.data2, "Check SDL_Event.user.data2, expected: %p, got: %p", &g_userdataValue2, event_out.user.data2);
     event_window = SDL_GetWindowFromEvent(&event_out);
     SDLTest_AssertCheck(NULL == SDL_GetWindowFromEvent(&event_out), "Check SDL_GetWindowFromEvent returns the window id from a user event, expected: NULL, got: %p", event_window);
 
@@ -109,7 +109,7 @@ static int events_pushPumpAndPollUserevent(void *arg)
  * \sa SDL_RemoveEventWatch
  *
  */
-static int events_addDelEventWatch(void *arg)
+static int SDLCALL events_addDelEventWatch(void *arg)
 {
     SDL_Event event;
 
@@ -159,7 +159,7 @@ static int events_addDelEventWatch(void *arg)
  * \sa SDL_RemoveEventWatch
  *
  */
-static int events_addDelEventWatchWithUserdata(void *arg)
+static int SDLCALL events_addDelEventWatchWithUserdata(void *arg)
 {
     SDL_Event event;
 

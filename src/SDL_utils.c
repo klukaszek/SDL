@@ -121,7 +121,6 @@ bool SDL_endswith(const char *string, const char *suffix)
     return false;
 }
 
-// Assume we can wrap SDL_AtomicInt values and cast to Uint32
 SDL_COMPILE_TIME_ASSERT(sizeof_object_id, sizeof(int) == sizeof(Uint32));
 
 Uint32 SDL_GetNextObjectID(void)

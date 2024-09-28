@@ -23,12 +23,6 @@ if(NOT (MSVC AND SDL_CPU_ARM64))
     find_package(OpenGL)
 endif()
 
-if(WINDOWS_STORE)
-    cmake_minimum_required(VERSION 3.19)
-    # CMP0112: Target file component generator expressions do not add target dependencies.
-    cmake_policy(SET CMP0112 NEW)
-endif()
-
 set(SDL_EXAMPLE_EXECUTABLES)
 
 if(CMAKE_RUNTIME_OUTPUT_DIRECTORY)
@@ -62,15 +56,6 @@ add_custom_target(copy-sdl-example-resources
     DEPENDS "${RESOURCE_FILES_BINDIR}"
 )
 
-if(WINDOWS_STORE)
-    add_library(sdl_example_main_callbacks_uwp OBJECT ${CMAKE_CURRENT_SOURCE_DIR}/../test/main.cpp)
-    target_link_libraries(sdl_example_main_callbacks_uwp PRIVATE SDL3::Headers)
-    target_compile_options(sdl_example_main_callbacks_uwp PRIVATE "/ZW")
-    target_compile_definitions(sdl_example_main_callbacks_uwp PRIVATE "SDL_MAIN_USE_CALLBACKS")
-
-    set_source_files_properties(${RESOURCE_FILES} PROPERTIES VS_DEPLOYENT_LOCATION "Assets")
-endif()
-
 macro(add_sdl_example_executable TARGET)
     cmake_parse_arguments(AST "BUILD_DEPENDENT" "" "SOURCES;DATAFILES" ${ARGN})
     if(AST_UNPARSED_ARGUMENTS)
@@ -80,28 +65,6 @@ macro(add_sdl_example_executable TARGET)
         message(FATAL_ERROR "add_sdl_example_executable needs at least one source")
     endif()
     set(EXTRA_SOURCES "")
-    if(WINDOWS_STORE)
-        set(uwp_bindir "${CMAKE_CURRENT_BINARY_DIR}/${TARGET}.dir")
-        if(NOT IS_DIRECTORY "${uwp_bindir}")
-            execute_process(COMMAND "${CMAKE_COMMAND}" -E make_directory "${uwp_bindir}")
-        endif()
-        string(REGEX REPLACE "[_]" "" SAFE_TARGET "${TARGET}")
-        file(GENERATE OUTPUT "${uwp_bindir}/${TARGET}.appxmanifest"
-            INPUT "${CMAKE_CURRENT_SOURCE_DIR}/../test/uwp/Package.appxmanifest.in"
-            TARGET "${TARGET}"
-        )
-        set_property(SOURCE "${uwp_bindir}/${TARGET}.appxmanifest" PROPERTY VS_DEPLOYMENT_CONTENT 1)
-
-        list(APPEND EXTRA_SOURCES "$<TARGET_OBJECTS:sdl_example_main_callbacks_uwp>")
-
-        list(APPEND EXTRA_SOURCES
-            "${uwp_bindir}/${TARGET}.appxmanifest"
-            "${CMAKE_CURRENT_SOURCE_DIR}/../test/uwp/logo-50x50.png"
-            "${CMAKE_CURRENT_SOURCE_DIR}/../test/uwp/square-44x44.png"
-            "${CMAKE_CURRENT_SOURCE_DIR}/../test/uwp/square-150x150.png"
-            "${CMAKE_CURRENT_SOURCE_DIR}/../test/uwp/splash-620x300.png"
-        )
-    endif()
     if(AST_DATAFILES)
         list(APPEND EXTRA_SOURCES ${DATAFILES})
     endif()
@@ -122,17 +85,6 @@ macro(add_sdl_example_executable TARGET)
                 COMMAND ${CMAKE_COMMAND} ARGS -E copy_if_different ${AST_DATAFILES} $<TARGET_FILE_DIR:${TARGET}>/sdl-${TARGET}
                 WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}"
             )
-        elseif(WINDOWS_STORE)
-            # MSVC does build the dependent targets (or POST_BUILD commands) when building an application
-            # after starting to debug. By copying the resources in a custom target, the files can be copied afterwards.
-            # FIXME: find out proper way to add assets to UWP package
-            cmake_minimum_required(VERSION 3.19)
-            add_custom_target(zzz-resources-copy-${TARGET}
-                COMMAND ${CMAKE_COMMAND} -E make_directory "$<TARGET_FILE_DIR:${TARGET}>/AppX"
-                COMMAND ${CMAKE_COMMAND} -E copy_if_different ${AST_DATAFILES} "$<TARGET_FILE_DIR:${TARGET}>/AppX"
-                WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}"
-            )
-            add_dependencies(${TARGET} zzz-resources-copy-${TARGET})
         else()
             add_dependencies(${TARGET} copy-sdl-example-resources)
         endif()
@@ -156,20 +108,7 @@ macro(add_sdl_example_executable TARGET)
         endif()
     elseif(PSP)
         target_link_libraries(${TARGET} PRIVATE GL)
-    endif()
-    if(WINDOWS_STORE)
-        target_compile_definitions(${TARGET} PRIVATE "SDL_MAIN_NOIMPL")
-        set_property(TARGET ${TARGET} PROPERTY WIN32_EXECUTABLE TRUE)
-        set_property(TARGET ${TARGET} PROPERTY RUNTIME_OUTPUT_DIRECTORY "${uwp_bindir}")
-        target_link_options(${TARGET} PRIVATE
-            -nodefaultlib:vccorlib$<$<CONFIG:Debug>:d>
-            -nodefaultlib:msvcrt$<$<CONFIG:Debug>:d>
-            vccorlib$<$<CONFIG:Debug>:d>.lib
-            msvcrt$<$<CONFIG:Debug>:d>.lib
-        )
-    endif()
-
-    if(EMSCRIPTEN)
+    elseif(EMSCRIPTEN)
         set_property(TARGET ${TARGET} PROPERTY SUFFIX ".html")
     endif()
 
@@ -181,8 +120,20 @@ macro(add_sdl_example_executable TARGET)
     target_include_directories(${TARGET} PRIVATE "$<TARGET_PROPERTY:SDL3::${sdl_name_component},INCLUDE_DIRECTORIES>")
 endmacro()
 
-add_sdl_example_executable(renderer-clear SOURCES renderer/01-clear/renderer-clear.c)
-add_sdl_example_executable(renderer-primitives SOURCES renderer/02-primitives/renderer-primitives.c)
+add_sdl_example_executable(renderer-clear SOURCES renderer/01-clear/clear.c)
+add_sdl_example_executable(renderer-primitives SOURCES renderer/02-primitives/primitives.c)
+add_sdl_example_executable(renderer-lines SOURCES renderer/03-lines/lines.c)
+add_sdl_example_executable(renderer-points SOURCES renderer/04-points/points.c)
+add_sdl_example_executable(renderer-rectangles SOURCES renderer/05-rectangles/rectangles.c)
+add_sdl_example_executable(renderer-textures SOURCES renderer/06-textures/textures.c DATAFILES ${CMAKE_CURRENT_SOURCE_DIR}/../test/sample.bmp)
+add_sdl_example_executable(renderer-streaming-textures SOURCES renderer/07-streaming-textures/streaming-textures.c)
+add_sdl_example_executable(renderer-rotating-textures SOURCES renderer/08-rotating-textures/rotating-textures.c DATAFILES ${CMAKE_CURRENT_SOURCE_DIR}/../test/sample.bmp)
+add_sdl_example_executable(renderer-scaling-textures SOURCES renderer/09-scaling-textures/scaling-textures.c DATAFILES ${CMAKE_CURRENT_SOURCE_DIR}/../test/sample.bmp)
+add_sdl_example_executable(renderer-geometry SOURCES renderer/10-geometry/geometry.c DATAFILES ${CMAKE_CURRENT_SOURCE_DIR}/../test/sample.bmp)
+add_sdl_example_executable(renderer-color-mods SOURCES renderer/11-color-mods/color-mods.c DATAFILES ${CMAKE_CURRENT_SOURCE_DIR}/../test/sample.bmp)
+add_sdl_example_executable(renderer-viewport SOURCES renderer/14-viewport/viewport.c DATAFILES ${CMAKE_CURRENT_SOURCE_DIR}/../test/sample.bmp)
+add_sdl_example_executable(renderer-cliprect SOURCES renderer/15-cliprect/cliprect.c DATAFILES ${CMAKE_CURRENT_SOURCE_DIR}/../test/sample.bmp)
+add_sdl_example_executable(renderer-read-pixels SOURCES renderer/17-read-pixels/read-pixels.c DATAFILES ${CMAKE_CURRENT_SOURCE_DIR}/../test/sample.bmp)
 add_sdl_example_executable(audio-simple-playback SOURCES audio/01-simple-playback/simple-playback.c)
 add_sdl_example_executable(audio-simple-playback-callback SOURCES audio/02-simple-playback-callback/simple-playback-callback.c)
 add_sdl_example_executable(audio-load-wav SOURCES audio/03-load-wav/load-wav.c DATAFILES ${CMAKE_CURRENT_SOURCE_DIR}/../test/sample.wav)

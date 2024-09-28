@@ -25,7 +25,7 @@
 #include "SDL_sysfilesystem.h"
 #include "../stdlib/SDL_sysstdlib.h"
 
-SDL_bool SDL_RemovePath(const char *path)
+bool SDL_RemovePath(const char *path)
 {
     if (!path) {
         return SDL_InvalidParamError("path");
@@ -33,7 +33,7 @@ SDL_bool SDL_RemovePath(const char *path)
     return SDL_SYS_RemovePath(path);
 }
 
-SDL_bool SDL_RenamePath(const char *oldpath, const char *newpath)
+bool SDL_RenamePath(const char *oldpath, const char *newpath)
 {
     if (!oldpath) {
         return SDL_InvalidParamError("oldpath");
@@ -43,7 +43,7 @@ SDL_bool SDL_RenamePath(const char *oldpath, const char *newpath)
     return SDL_SYS_RenamePath(oldpath, newpath);
 }
 
-SDL_bool SDL_CopyFile(const char *oldpath, const char *newpath)
+bool SDL_CopyFile(const char *oldpath, const char *newpath)
 {
     if (!oldpath) {
         return SDL_InvalidParamError("oldpath");
@@ -53,29 +53,75 @@ SDL_bool SDL_CopyFile(const char *oldpath, const char *newpath)
     return SDL_SYS_CopyFile(oldpath, newpath);
 }
 
-SDL_bool SDL_CreateDirectory(const char *path)
+bool SDL_CreateDirectory(const char *path)
 {
-    // TODO: Recursively create subdirectories
     if (!path) {
         return SDL_InvalidParamError("path");
     }
-    return SDL_SYS_CreateDirectory(path);
+
+    bool retval = SDL_SYS_CreateDirectory(path);
+    if (!retval && *path) {  // maybe we're missing parent directories?
+        char *parents = SDL_strdup(path);
+        if (!parents) {
+            return false;  // oh well.
+        }
+
+        // in case there was a separator at the end of the path and it was
+        // upsetting something, chop it off.
+        const size_t slen = SDL_strlen(parents);
+        #ifdef SDL_PLATFORM_WINDOWS
+        if ((parents[slen - 1] == '/') || (parents[slen - 1] == '\\'))
+        #else
+        if (parents[slen - 1] == '/')
+        #endif
+        {
+            parents[slen - 1] = '\0';
+            retval = SDL_SYS_CreateDirectory(parents);
+        }
+
+        if (!retval) {
+            for (char *ptr = parents; *ptr; ptr++) {
+                const char ch = *ptr;
+                #ifdef SDL_PLATFORM_WINDOWS
+                const bool issep = (ch == '/') || (ch == '\\');
+                if (issep && ((ptr - parents) == 2) && (parents[1] == ':')) {
+                    continue;  // it's just the drive letter, skip it.
+                }
+                #else
+                const bool issep = (ch == '/');
+                #endif
+
+                if (issep) {
+                    *ptr = '\0';
+                    // (this does not fail if the path already exists as a directory.)
+                    retval = SDL_SYS_CreateDirectory(parents);
+                    if (!retval) {  // still failing when making parents? Give up.
+                        break;
+                    }
+                    *ptr = ch;
+                }
+            }
+
+            // last chance: did it work this time?
+            retval = SDL_SYS_CreateDirectory(parents);
+        }
+
+        SDL_free(parents);
+    }
+    return retval;
 }
 
-SDL_bool SDL_EnumerateDirectory(const char *path, SDL_EnumerateDirectoryCallback callback, void *userdata)
+bool SDL_EnumerateDirectory(const char *path, SDL_EnumerateDirectoryCallback callback, void *userdata)
 {
     if (!path) {
         return SDL_InvalidParamError("path");
     } else if (!callback) {
         return SDL_InvalidParamError("callback");
     }
-    if (SDL_SYS_EnumerateDirectory(path, path, callback, userdata) < 0) {
-        return false;
-    }
-    return true;
+    return SDL_SYS_EnumerateDirectory(path, path, callback, userdata);
 }
 
-SDL_bool SDL_GetPathInfo(const char *path, SDL_PathInfo *info)
+bool SDL_GetPathInfo(const char *path, SDL_PathInfo *info)
 {
     SDL_PathInfo dummy;
 
@@ -399,12 +445,12 @@ char **SDL_InternalGlobDirectory(const char *path, const char *pattern, SDL_Glob
     return result;
 }
 
-static SDL_bool GlobDirectoryGetPathInfo(const char *path, SDL_PathInfo *info, void *userdata)
+static bool GlobDirectoryGetPathInfo(const char *path, SDL_PathInfo *info, void *userdata)
 {
     return SDL_GetPathInfo(path, info);
 }
 
-static SDL_bool GlobDirectoryEnumerator(const char *path, SDL_EnumerateDirectoryCallback cb, void *cbuserdata, void *userdata)
+static bool GlobDirectoryEnumerator(const char *path, SDL_EnumerateDirectoryCallback cb, void *cbuserdata, void *userdata)
 {
     return SDL_EnumerateDirectory(path, cb, cbuserdata);
 }
@@ -427,7 +473,7 @@ const char *SDL_GetBasePath(void)
 }
 
 
-static char *CachedUserFolders[SDL_FOLDER_TOTAL];
+static char *CachedUserFolders[SDL_FOLDER_COUNT];
 
 const char *SDL_GetUserFolder(SDL_Folder folder)
 {
