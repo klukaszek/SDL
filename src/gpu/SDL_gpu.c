@@ -575,7 +575,6 @@ static void SDL_GPU_FillProperties(
 #ifdef __EMSCRIPTEN__
     SDL_SetHint(SDL_HINT_GPU_DRIVER, "webgpu");
 #endif
-    SDL_PropertiesID props = SDL_CreateProperties();
 
     if (formatFlags & SDL_GPU_SHADERFORMAT_PRIVATE) {
         SDL_SetBooleanProperty(props, SDL_PROP_GPU_DEVICE_CREATE_SHADERS_PRIVATE_BOOL, true);
