@@ -570,6 +570,13 @@ static void SDL_GPU_FillProperties(
     bool debug_mode,
     const char *name)
 {
+
+    SDL_GPUDevice *result;
+#ifdef __EMSCRIPTEN__
+    SDL_SetHint(SDL_HINT_GPU_DRIVER, "webgpu");
+#endif
+    SDL_PropertiesID props = SDL_CreateProperties();
+
     if (formatFlags & SDL_GPU_SHADERFORMAT_PRIVATE) {
         SDL_SetBooleanProperty(props, SDL_PROP_GPU_DEVICE_CREATE_SHADERS_PRIVATE_BOOL, true);
     }
@@ -603,6 +610,7 @@ bool SDL_GPUSupportsShaderFormats(
     SDL_GPU_FillProperties(props, formatFlags, false, name);
     result = SDL_GPUSupportsProperties(props);
     SDL_DestroyProperties(props);
+    SDL_Log("SDL_CreateGPUDevice: %s", result ? "success" : "failure");
     return result;
 #else
     SDL_SetError("SDL not built with GPU support");

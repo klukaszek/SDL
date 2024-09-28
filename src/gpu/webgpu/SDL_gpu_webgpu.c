@@ -1871,7 +1871,6 @@ static SDL_GPUGraphicsPipeline *WebGPU_CreateGraphicsPipeline(
     wgpuDevicePopErrorScope(renderer->device, WebGPU_ErrorCallback, renderer);
 
     SDL_Log("Graphics Pipeline Created Successfully");
-
     return (SDL_GPUGraphicsPipeline *)pipeline;
 }
 
@@ -2122,7 +2121,7 @@ static SDL_GPUDevice *WebGPU_CreateDevice(bool debug, bool preferLowPower, SDL_P
     result->AcquireCommandBuffer = WebGPU_AcquireCommandBuffer;
     result->AcquireSwapchainTexture = WebGPU_AcquireSwapchainTexture;
     result->GetSwapchainTextureFormat = WebGPU_GetSwapchainTextureFormat;
-
+  
     result->CreateShader = WebGPU_CreateShader;
     result->ReleaseShader = WebGPU_ReleaseShader;
 
