@@ -15,16 +15,8 @@
 #include <SDL3/SDL_stdinc.h>
 #include <emscripten/emscripten.h>
 #include <emscripten/html5.h>
-/*#include <spirv_cross_c.h>*/
 #include <stdint.h>
 #include <webgpu/webgpu.h>
-
-/* Tint WASM exported functions START */
-
-/*void tint_initialize(void);*/
-/*const char *tint_spv_to_wgsl(const void *shader_data, const size_t shader_size);*/
-
-/* Tint WASM exported functions END */
 
 #define MAX_UBO_SECTION_SIZE          4096 // 4   KiB
 #define DESCRIPTOR_POOL_STARTING_SIZE 128
@@ -112,7 +104,7 @@ typedef enum WebGPUBufferType
     WEBGPU_BUFFER_TYPE_TRANSFER
 } WebGPUBufferType;
 
-// SPIRV-Reflection Definitions:
+// Shader Reflection Definitions:
 // ---------------------------------------------------
 typedef struct ReflectedBinding
 {
@@ -138,8 +130,6 @@ typedef struct WebGPUTextureContainer WebGPUTextureContainer;
 typedef struct WebGPUShader
 {
     char *wgslSource;
-    uint32_t *spirv;
-    size_t spirvSize;
     WGPUShaderModule shaderModule;
     const char *entrypoint;
     Uint32 samplerCount;
@@ -1446,6 +1436,7 @@ SDL_GPUShader *WebGPU_CreateShader(
     WebGPUShader *shader = SDL_calloc(1, sizeof(WebGPUShader));
 
     const char *wgsl = (const char *)shaderCreateInfo->code;
+    SDL_Log("WGSL Source: %s", wgsl);
 
     WGPUShaderModuleWGSLDescriptor wgsl_desc = {
         .chain = {
@@ -1462,9 +1453,6 @@ SDL_GPUShader *WebGPU_CreateShader(
 
     // Create a WebGPUShader object to cast to SDL_GPUShader *
     uint32_t entryPointNameLength = SDL_strlen(shaderCreateInfo->entrypoint) + 1;
-    shader->spirv = SDL_malloc(shaderCreateInfo->code_size);
-    SDL_memcpy(shader->spirv, shaderCreateInfo->code, shaderCreateInfo->code_size);
-    shader->spirvSize = shaderCreateInfo->code_size;
     shader->wgslSource = SDL_malloc(SDL_strlen(wgsl) + 1);
     SDL_strlcpy((char *)shader->wgslSource, wgsl, SDL_strlen(wgsl) + 1);
     shader->entrypoint = SDL_malloc(entryPointNameLength);
@@ -1498,7 +1486,6 @@ static void WebGPU_ReleaseShader(
 
     // Free entry function string
     SDL_free((void *)wgpuShader->entrypoint);
-    SDL_free((void *)wgpuShader->spirv);
 
     // Release the shader module
     wgpuShaderModuleRelease(wgpuShader->shaderModule);
@@ -1534,21 +1521,13 @@ static SDL_GPUGraphicsPipeline *WebGPU_CreateGraphicsPipeline(
     WebGPUShader *vertShader = (WebGPUShader *)pipelineCreateInfo->vertex_shader;
     WebGPUShader *fragShader = (WebGPUShader *)pipelineCreateInfo->fragment_shader;
 
-    // Get the bind groups for the vertex and fragment shaders using SPIRV's parser and compiler.
-    // We do this because WebGPU requires us to create bind group layouts for the pipeline layout even
-    // though bind groups aren't a thing in SPIRV, they use sets and bindings instead from my understanding.
+    // TODO: Find a new way to reflect bindings now that we are using WGSL instead of SPIR-V
     uint32_t vertexBindGroupCount = 0;
     uint32_t fragmentBindGroupCount = 0;
     ReflectedBindGroup *vertexBindGroups = NULL;
     ReflectedBindGroup *fragmentBindGroups = NULL;
 
-    /*ReflectedBindGroup *vertexBindGroups = ReflectSPIRVShaderBindings(vertShader->spirv,*/
-    /*                                                                  vertShader->spirvSize,*/
-    /*                                                                  WGPUShaderStage_Vertex, &vertexBindGroupCount);*/
-    /*ReflectedBindGroup *fragmentBindGroups = ReflectSPIRVShaderBindings(fragShader->spirv,*/
-    /*                                                                    fragShader->spirvSize,*/
-    /*                                                                    WGPUShaderStage_Fragment, &fragmentBindGroupCount);*/
-
+    // TODO: For now this will be a placeholder until we can reflect bindings from WGSL
     WebGPUPipelineResourceLayout *resourceLayout = CreateResourceLayoutFromReflection(renderer,
                                                                                       vertexBindGroups,
                                                                                       vertexBindGroupCount,
@@ -1931,10 +1910,7 @@ static SDL_GPUDevice *WebGPU_CreateDevice(bool debug, bool preferLowPower, SDL_P
 
     result = (SDL_GPUDevice *)SDL_malloc(sizeof(SDL_GPUDevice));
 
-    // Initialize Tint for SPIRV to WGSL conversion
-    /*tint_initialize();*/
-
-    /*
+       /*
     TODO: Ensure that all function signatures for the driver are correct so that the following line compiles
           This will attach all of the driver's functions to the SDL_GPUDevice struct
 
