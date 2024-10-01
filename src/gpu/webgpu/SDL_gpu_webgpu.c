@@ -15,6 +15,7 @@
 #include <SDL3/SDL_stdinc.h>
 #include <emscripten/emscripten.h>
 #include <emscripten/html5.h>
+#include <stdint.h>
 #include <webgpu/webgpu.h>
 
 #define MAX_UBO_SECTION_SIZE          4096 // 4   KiB
