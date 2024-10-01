@@ -15,14 +15,14 @@
 #include <SDL3/SDL_stdinc.h>
 #include <emscripten/emscripten.h>
 #include <emscripten/html5.h>
-#include <spirv_cross_c.h>
+/*#include <spirv_cross_c.h>*/
 #include <stdint.h>
 #include <webgpu/webgpu.h>
 
 /* Tint WASM exported functions START */
 
-void tint_initialize(void);
-const char *tint_spv_to_wgsl(const void *shader_data, const size_t shader_size);
+/*void tint_initialize(void);*/
+/*const char *tint_spv_to_wgsl(const void *shader_data, const size_t shader_size);*/
 
 /* Tint WASM exported functions END */
 
@@ -104,24 +104,6 @@ typedef enum WebGPUBindingType
     WGPUBindingType_ReadOnlyStorageTexture = 0x00000045,
     WGPUBindingType_ReadWriteStorageTexture = 0x00000046,
 } WebGPUBindingType;
-
-static WebGPUBindingType SPIRVToWebGPUBindingType(spvc_resource_type type)
-{
-    switch (type) {
-    case SPVC_RESOURCE_TYPE_UNIFORM_BUFFER:
-        return WGPUBindingType_UniformBuffer;
-    case SPVC_RESOURCE_TYPE_STORAGE_BUFFER:
-        return WGPUBindingType_StorageBuffer;
-    case SPVC_RESOURCE_TYPE_SEPARATE_SAMPLERS:
-        return WGPUBindingType_Sampler;
-    case SPVC_RESOURCE_TYPE_SAMPLED_IMAGE:
-        return WGPUBindingType_Texture;
-    case SPVC_RESOURCE_TYPE_STORAGE_IMAGE:
-        return WGPUBindingType_StorageTexture;
-    default:
-        return WGPUBindingType_Undefined;
-    }
-}
 
 typedef enum WebGPUBufferType
 {
@@ -833,171 +815,8 @@ static WGPUPresentMode SDLToWGPUPresentMode(SDL_GPUPresentMode presentMode)
     }
 }
 
+// WGPU Bind Group Layout Functions
 // ---------------------------------------------------
-
-// SPIRV-Reflection Functions:
-// ---------------------------------------------------
-static void ReflectSPIRVShaderBindings_INTERNAL(spvc_compiler *compiler,
-                                                spvc_resources *resources,
-                                                spvc_resource_type type,
-                                                const spvc_reflected_resource *reflectedResources,
-                                                ReflectedBindGroup *bindGroups,
-                                                uint32_t *maxSet,
-                                                WGPUShaderStageFlags stageFlags)
-{
-    if (compiler == NULL) {
-        SDL_LogError(SDL_LOG_CATEGORY_GPU, "Invalid SPIRV compiler.");
-        return;
-    }
-
-    if (resources == NULL) {
-        SDL_LogError(SDL_LOG_CATEGORY_GPU, "Invalid SPIRV resources.");
-        return;
-    }
-
-    if (maxSet == NULL) {
-        SDL_LogError(SDL_LOG_CATEGORY_GPU, "Invalid max set pointer.");
-        return;
-    }
-
-    size_t reflectedCount;
-
-    // Get the resources for the specified type
-    spvc_resources_get_resource_list_for_type(*resources, type, &reflectedResources, &reflectedCount);
-
-    if (reflectedCount == 0) {
-        return;
-    }
-
-    SDL_Log("Reflected %zu resource(s) of type %d", reflectedCount, type);
-
-    for (size_t i = 0; i < reflectedCount; i += 1) {
-        // Get the descriptor set and binding
-        uint32_t set = spvc_compiler_get_decoration(*compiler, reflectedResources[i].id, SpvDecorationDescriptorSet);
-        uint32_t binding = spvc_compiler_get_decoration(*compiler, reflectedResources[i].id, SpvDecorationBinding);
-
-        // Update the max set value within the pointer
-        if (set > *maxSet) {
-            *maxSet = set;
-        }
-
-        // Calloc enough memory for the bindgroups if it hasn't been allocated yet
-        // The individual bindgroups are resized as needed
-        if (!bindGroups) {
-            bindGroups = SDL_calloc((size_t)set + 1, sizeof(ReflectedBindGroup));
-            bindGroups[0].bindingCount = 0;
-        }
-
-        ReflectedBinding *newBinding = SDL_realloc(bindGroups[set].bindings,
-                                                   (bindGroups[set].bindingCount + 1) * sizeof(ReflectedBinding));
-        if (!newBinding) {
-            SDL_free(bindGroups);
-            SDL_LogError(SDL_LOG_CATEGORY_GPU, "Failed to allocate memory for reflected bindings.");
-            return;
-        }
-
-        bindGroups[set].bindings = newBinding;
-        bindGroups[set].bindings[bindGroups[set].bindingCount] = (ReflectedBinding){
-            .set = set,
-            .binding = binding,
-            .type = SPIRVToWebGPUBindingType(type),
-            .stages = stageFlags,
-        };
-        bindGroups[set].bindingCount += 1;
-    }
-
-    SDL_free((void *)reflectedResources);
-}
-
-static ReflectedBindGroup *ReflectSPIRVShaderBindings(
-    const uint32_t *spirv,
-    size_t spirvSize,
-    WGPUShaderStageFlags stageFlags,
-    uint32_t *outBindGroupCount)
-{
-    spvc_context context;
-    spvc_parsed_ir ir;
-    spvc_compiler compiler;
-    spvc_resources resources;
-
-    const spvc_reflected_resource *reflectedResources = NULL;
-
-    // Initialize SPIRV-Cross
-    spvc_context_create(&context);
-    spvc_context_parse_spirv(context, spirv, spirvSize / sizeof(uint32_t), &ir);
-    spvc_context_create_compiler(context, SPVC_BACKEND_NONE, ir, SPVC_CAPTURE_MODE_TAKE_OWNERSHIP, &compiler);
-
-    // Create spirv shader resources
-    spvc_compiler_create_shader_resources(compiler, &resources);
-    if (!resources) {
-        spvc_context_destroy(context);
-        SDL_LogError(SDL_LOG_CATEGORY_GPU, "Failed to create shader resources.");
-        return NULL;
-    }
-
-    // Reflected bind groups
-    ReflectedBindGroup *bindGroups = NULL;
-    uint32_t maxSet = 0;
-
-    // Reflect gl variables
-    SDL_Log("Reflecting gl uniforms...");
-    ReflectSPIRVShaderBindings_INTERNAL(&compiler, &resources,
-                                        SPVC_RESOURCE_TYPE_GL_PLAIN_UNIFORM,
-                                        reflectedResources, bindGroups, &maxSet, stageFlags);
-
-    // Reflect Vertex attributes
-    SDL_Log("Reflecting vertex attributes...");
-    ReflectSPIRVShaderBindings_INTERNAL(&compiler, &resources,
-                                        SPVC_RESOURCE_TYPE_STAGE_INPUT,
-                                        reflectedResources, bindGroups, &maxSet, stageFlags);
-
-    // Reflect uniform buffers
-    SDL_Log("Reflecting uniform buffers...");
-    ReflectSPIRVShaderBindings_INTERNAL(&compiler, &resources,
-                                        SPVC_RESOURCE_TYPE_UNIFORM_BUFFER,
-                                        reflectedResources, bindGroups, &maxSet, stageFlags);
-
-    // Reflect storage buffers
-    SDL_Log("Reflecting storage buffers...");
-    ReflectSPIRVShaderBindings_INTERNAL(&compiler, &resources,
-                                        SPVC_RESOURCE_TYPE_STORAGE_BUFFER,
-                                        reflectedResources, bindGroups, &maxSet, stageFlags);
-
-    // Store textures
-    SDL_Log("Reflecting textures...");
-    ReflectSPIRVShaderBindings_INTERNAL(&compiler, &resources,
-                                        SPVC_RESOURCE_TYPE_SEPARATE_IMAGE,
-                                        reflectedResources, bindGroups, &maxSet, stageFlags);
-
-    // Reflect storage images
-    SDL_Log("Reflecting storage textures...");
-    ReflectSPIRVShaderBindings_INTERNAL(&compiler, &resources,
-                                        SPVC_RESOURCE_TYPE_STORAGE_IMAGE,
-                                        reflectedResources, bindGroups, &maxSet, stageFlags);
-
-    // Reflect sampled images
-    SDL_Log("Reflecting sampled texture...");
-    ReflectSPIRVShaderBindings_INTERNAL(&compiler, &resources,
-                                        SPVC_RESOURCE_TYPE_SAMPLED_IMAGE,
-                                        reflectedResources, bindGroups, &maxSet, stageFlags);
-
-    // Reflect samplers
-    SDL_Log("Reflecting reflecting samplers...");
-    ReflectSPIRVShaderBindings_INTERNAL(&compiler, &resources,
-                                        SPVC_RESOURCE_TYPE_SEPARATE_SAMPLERS,
-                                        reflectedResources, bindGroups, &maxSet, stageFlags);
-
-    SDL_Log("Max set: %d", maxSet);
-
-    // Free resources
-    spvc_context_destroy(context);
-    SDL_free((void *)reflectedResources);
-
-    // Set the output bind group count
-    *outBindGroupCount = maxSet;
-    return bindGroups;
-}
-
 static void WebGPU_CreateBindingLayout(WGPUBindGroupLayoutEntry *entry, ReflectedBinding *binding)
 {
     switch (binding->type) {
@@ -1626,9 +1445,7 @@ SDL_GPUShader *WebGPU_CreateShader(
     WebGPURenderer *renderer = (WebGPURenderer *)driverData;
     WebGPUShader *shader = SDL_calloc(1, sizeof(WebGPUShader));
 
-    const char *wgsl = tint_spv_to_wgsl(shaderCreateInfo->code, shaderCreateInfo->code_size);
-
-    printf("WGSL: %s", wgsl);
+    const char *wgsl = (const char *)shaderCreateInfo->code;
 
     WGPUShaderModuleWGSLDescriptor wgsl_desc = {
         .chain = {
@@ -1722,12 +1539,15 @@ static SDL_GPUGraphicsPipeline *WebGPU_CreateGraphicsPipeline(
     // though bind groups aren't a thing in SPIRV, they use sets and bindings instead from my understanding.
     uint32_t vertexBindGroupCount = 0;
     uint32_t fragmentBindGroupCount = 0;
-    ReflectedBindGroup *vertexBindGroups = ReflectSPIRVShaderBindings(vertShader->spirv,
-                                                                      vertShader->spirvSize,
-                                                                      WGPUShaderStage_Vertex, &vertexBindGroupCount);
-    ReflectedBindGroup *fragmentBindGroups = ReflectSPIRVShaderBindings(fragShader->spirv,
-                                                                        fragShader->spirvSize,
-                                                                        WGPUShaderStage_Fragment, &fragmentBindGroupCount);
+    ReflectedBindGroup *vertexBindGroups = NULL;
+    ReflectedBindGroup *fragmentBindGroups = NULL;
+
+    /*ReflectedBindGroup *vertexBindGroups = ReflectSPIRVShaderBindings(vertShader->spirv,*/
+    /*                                                                  vertShader->spirvSize,*/
+    /*                                                                  WGPUShaderStage_Vertex, &vertexBindGroupCount);*/
+    /*ReflectedBindGroup *fragmentBindGroups = ReflectSPIRVShaderBindings(fragShader->spirv,*/
+    /*                                                                    fragShader->spirvSize,*/
+    /*                                                                    WGPUShaderStage_Fragment, &fragmentBindGroupCount);*/
 
     WebGPUPipelineResourceLayout *resourceLayout = CreateResourceLayoutFromReflection(renderer,
                                                                                       vertexBindGroups,
@@ -2112,7 +1932,7 @@ static SDL_GPUDevice *WebGPU_CreateDevice(bool debug, bool preferLowPower, SDL_P
     result = (SDL_GPUDevice *)SDL_malloc(sizeof(SDL_GPUDevice));
 
     // Initialize Tint for SPIRV to WGSL conversion
-    tint_initialize();
+    /*tint_initialize();*/
 
     /*
     TODO: Ensure that all function signatures for the driver are correct so that the following line compiles
@@ -2157,7 +1977,7 @@ static SDL_GPUDevice *WebGPU_CreateDevice(bool debug, bool preferLowPower, SDL_P
 
 SDL_GPUBootstrap WebGPUDriver = {
     "webgpu",
-    SDL_GPU_SHADERFORMAT_WGSL | SDL_GPU_SHADERFORMAT_SPIRV,
+    SDL_GPU_SHADERFORMAT_WGSL,
     WebGPU_PrepareDriver,
     WebGPU_CreateDevice,
 };
