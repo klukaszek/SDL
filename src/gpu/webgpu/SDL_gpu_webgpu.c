@@ -1436,7 +1436,6 @@ SDL_GPUShader *WebGPU_CreateShader(
     WebGPUShader *shader = SDL_calloc(1, sizeof(WebGPUShader));
 
     const char *wgsl = (const char *)shaderCreateInfo->code;
-    SDL_Log("WGSL Source: %s", wgsl);
 
     WGPUShaderModuleWGSLDescriptor wgsl_desc = {
         .chain = {
