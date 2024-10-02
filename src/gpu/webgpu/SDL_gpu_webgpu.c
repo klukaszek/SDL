@@ -805,6 +805,34 @@ static WGPUPresentMode SDLToWGPUPresentMode(SDL_GPUPresentMode presentMode)
     }
 }
 
+WGPUVertexStepMode SDLToWGPUInputStepMode(SDL_GPUVertexInputRate inputRate)
+{
+    switch (inputRate) {
+    case SDL_GPU_VERTEXINPUTRATE_VERTEX:
+        return WGPUVertexStepMode_Vertex;
+    case SDL_GPU_VERTEXINPUTRATE_INSTANCE:
+        return WGPUVertexStepMode_Instance;
+    default:
+        return WGPUVertexStepMode_Undefined;
+    }
+}
+
+WGPUVertexFormat SDLToWGPUVertexFormat(SDL_GPUVertexElementFormat format)
+{
+    switch (format) {
+    case SDL_GPU_VERTEXELEMENTFORMAT_FLOAT:
+        return WGPUVertexFormat_Float32;
+    case SDL_GPU_VERTEXELEMENTFORMAT_FLOAT2:
+        return WGPUVertexFormat_Float32x2;
+    case SDL_GPU_VERTEXELEMENTFORMAT_FLOAT3:
+        return WGPUVertexFormat_Float32x3;
+    case SDL_GPU_VERTEXELEMENTFORMAT_FLOAT4:
+        return WGPUVertexFormat_Float32x4;
+    default:
+        return WGPUVertexFormat_Undefined;
+    }
+}
+
 // WGPU Bind Group Layout Functions
 // ---------------------------------------------------
 static void WebGPU_CreateBindingLayout(WGPUBindGroupLayoutEntry *entry, ReflectedBinding *binding)
@@ -1504,6 +1532,98 @@ static void WebGPU_INTERNAL_TrackGraphicsPipeline(WebGPUCommandBuffer *commandBu
         usedGraphicsPipelineCapacity)
 }
 
+// When building a graphics pipeline, we need to create the VertexState which is comprised of a shader module, an entry,
+// and vertex buffer layouts. Using the existing SDL_GPUVertexInputState, we can create the vertex buffer layouts and
+// pass them to the WGPUVertexState.
+static WGPUVertexBufferLayout *SDL_WGPU_INTERNAL_CreateVertexBufferLayouts(const SDL_GPUVertexInputState *vertexInputState)
+{
+    if (vertexInputState == NULL) {
+        SDL_LogError(SDL_LOG_CATEGORY_GPU, "Vertex input state must not be NULL when creating vertex buffer layouts");
+        return NULL;
+    }
+
+    // Allocate memory for the vertex buffer layouts if needed.
+    // Otherwise, early return NULL if there are no vertex buffers to create layouts for.
+    WGPUVertexBufferLayout *vertexBufferLayouts;
+    if (vertexInputState->num_vertex_buffers != 0) {
+        vertexBufferLayouts = SDL_malloc(sizeof(WGPUVertexBufferLayout) * vertexInputState->num_vertex_buffers);
+        if (vertexBufferLayouts == NULL) {
+            SDL_OutOfMemory();
+            return NULL;
+        }
+    } else {
+        // This is not a bad thing. Just means we have no vertex buffers to create layouts for.
+        return NULL;
+    }
+
+    // Allocate memory for the vertex attributes
+    WGPUVertexAttribute *attributes = SDL_malloc(sizeof(WGPUVertexAttribute) * vertexInputState->num_vertex_attributes);
+    if (attributes == NULL) {
+        SDL_OutOfMemory();
+        return NULL;
+    }
+
+    // Iterate through the vertex attributes and build the WGPUVertexAttribute array.
+    // We also determine where each attribute belongs. This is used to build the vertex buffer layouts.
+    Uint32 attribute_buffer_indices[vertexInputState->num_vertex_attributes];
+    for (Uint32 i = 0; i < vertexInputState->num_vertex_attributes; i += 1) {
+        const SDL_GPUVertexAttribute *vertexAttribute = &vertexInputState->vertex_attributes[i];
+        attributes[i] = (WGPUVertexAttribute){
+            .format = SDLToWGPUVertexFormat(vertexAttribute->format),
+            .offset = vertexAttribute->offset,
+            .shaderLocation = vertexAttribute->location,
+        };
+        attribute_buffer_indices[i] = vertexAttribute->buffer_slot;
+    }
+
+    // Iterate through the vertex buffers and build the WGPUVertexBufferLayouts using our attributes array.
+    for (Uint32 i = 0; i < vertexInputState->num_vertex_buffers; i += 1) {
+        Uint32 numAttributes = 0;
+        // Not incredibly efficient but for now this will build the attributes for each vertex buffer
+        for (Uint32 j = 0; j < vertexInputState->num_vertex_attributes; j += 1) {
+            if (attribute_buffer_indices[j] == i) {
+                numAttributes += 1;
+            }
+        }
+
+        // Build the attributes for the current iteration's vertex buffer
+        WGPUVertexAttribute *buffer_attributes;
+        if (numAttributes == 0) {
+            buffer_attributes = NULL;
+            SDL_Log("No attributes found for vertex buffer %d", i);
+        } else {
+            buffer_attributes = SDL_malloc(sizeof(WGPUVertexAttribute *) * numAttributes);
+            if (buffer_attributes == NULL) {
+                SDL_OutOfMemory();
+                return NULL;
+            }
+
+            int count = 0;
+            // Iterate through the vertex attributes and populate the attributes array
+            for (Uint32 j = 0; j < vertexInputState->num_vertex_attributes; j += 1) {
+                if (attribute_buffer_indices[j] == i) {
+                    // Set the pointer to the appropriate attribute in the buffer
+                    buffer_attributes[count] = attributes[j];
+                    count += 1;
+                }
+            } // End attribute iteration
+        }
+
+        // Build the vertex buffer layout for the current vertex buffer using the attributes list (can be NULL)
+        // This is then passed to the vertex state for the render pipeline
+        const SDL_GPUVertexBufferDescription *vertexBuffer = &vertexInputState->vertex_buffer_descriptions[i];
+        vertexBufferLayouts[i] = (WGPUVertexBufferLayout){
+            .arrayStride = vertexBuffer->pitch,
+            .stepMode = SDLToWGPUInputStepMode(vertexBuffer->input_rate),
+            .attributeCount = numAttributes,
+            .attributes = buffer_attributes,
+        };
+    }
+
+    // Return a pointer to the head of the vertex buffer layouts
+    return vertexBufferLayouts;
+}
+
 static SDL_GPUGraphicsPipeline *WebGPU_CreateGraphicsPipeline(
     SDL_GPURenderer *driverData,
     const SDL_GPUGraphicsPipelineCreateInfo *pipelineCreateInfo)
@@ -1553,6 +1673,11 @@ static SDL_GPUGraphicsPipeline *WebGPU_CreateGraphicsPipeline(
 
     resourceLayout->pipelineLayout = pipelineLayout;
 
+    const SDL_GPUVertexInputState *vertexInputState = &pipelineCreateInfo->vertex_input_state;
+
+    // Get the vertex buffer layouts for the vertex state if they exist
+    WGPUVertexBufferLayout *vertexBufferLayouts = SDL_WGPU_INTERNAL_CreateVertexBufferLayouts(vertexInputState);
+
     // Create the vertex state for the render pipeline
     WGPUVertexState vertexState = {
         .module = wgpuDeviceCreateShaderModule(renderer->device, &(WGPUShaderModuleDescriptor){
@@ -1565,17 +1690,18 @@ static SDL_GPUGraphicsPipeline *WebGPU_CreateGraphicsPipeline(
                                                                          .code = vertShader->wgslSource,
                                                                      },
                                                                  }),
-        .entryPoint = "main",
-        .bufferCount = 0,
-        .buffers = NULL, // TODO: Create an array of WGPUVertexBufferLayout for each vertex binding.
-        .constantCount = pipelineCreateInfo->vertex_input_state.num_vertex_attributes,
-        .constants = NULL, // TODO: Create an array of WGPUConstantEntries for each vertex attribute.
+        .entryPoint = vertShader->entrypoint,
+        .bufferCount = pipelineCreateInfo->vertex_input_state.num_vertex_buffers,
+        .buffers = vertexBufferLayouts,
+        .constantCount = 0, // Leave as 0 as the Vulkan backend does not support push constants either
+        .constants = NULL,  // Leave as NULL as the Vulkan backend does not support push constants either
     };
 
-    // Build the color targets for the render pipeline
-    WGPUColorTargetState *colorTargets = SDL_malloc(sizeof(WGPUColorTargetState) * pipelineCreateInfo->target_info.num_color_targets);
-    for (Uint32 i = 0; i < pipelineCreateInfo->target_info.num_color_targets; i += 1) {
-        const SDL_GPUColorTargetDescription *colorAttachment = &pipelineCreateInfo->target_info.color_target_descriptions[i];
+    // Build the color targets for the render pipeline'
+    const SDL_GPUGraphicsPipelineTargetInfo *targetInfo = &pipelineCreateInfo->target_info;
+    WGPUColorTargetState *colorTargets = SDL_malloc(sizeof(WGPUColorTargetState) * targetInfo->num_color_targets);
+    for (Uint32 i = 0; i < targetInfo->num_color_targets; i += 1) {
+        const SDL_GPUColorTargetDescription *colorAttachment = &targetInfo->color_target_descriptions[i];
         SDL_GPUColorTargetBlendState blendState = colorAttachment->blend_state;
         colorTargets[i] = (WGPUColorTargetState){
             .format = SDLToWGPUTextureFormat(colorAttachment->format),
@@ -1598,10 +1724,10 @@ static SDL_GPUGraphicsPipeline *WebGPU_CreateGraphicsPipeline(
     // Create the fragment state for the render pipeline
     WGPUFragmentState fragmentState = {
         .module = fragShader->shaderModule,
-        .entryPoint = "main",
+        .entryPoint = fragShader->entrypoint,
         .constantCount = 0,
         .constants = NULL,
-        .targetCount = pipelineCreateInfo->target_info.num_color_targets,
+        .targetCount = targetInfo->num_color_targets,
         .targets = colorTargets,
     };
 
@@ -1658,15 +1784,15 @@ static SDL_GPUGraphicsPipeline *WebGPU_CreateGraphicsPipeline(
     wgpuPipelineLayoutRelease(pipelineLayout);
     SDL_free(resourceLayout);
 
-    // Free reflected bind groups
-    for (uint32_t i = 0; i < vertexBindGroupCount; i++) {
-        SDL_free(vertexBindGroups[i].bindings);
+    // Iterate through the VertexBufferLayouts and free the attributes, then free the layout.
+    // This can be done since everything has already been copied to the final render pipeline.
+    for (Uint32 i = 0; i < vertexInputState->num_vertex_buffers; i += 1) {
+        WGPUVertexBufferLayout *bufferLayout = &vertexBufferLayouts[i];
+        if (bufferLayout->attributes != NULL) {
+            SDL_free((void *)bufferLayout->attributes);
+        }
+        SDL_free(bufferLayout);
     }
-    SDL_free(vertexBindGroups);
-    for (uint32_t i = 0; i < fragmentBindGroupCount; i++) {
-        SDL_free(fragmentBindGroups[i].bindings);
-    }
-    SDL_free(fragmentBindGroups);
 
     wgpuDevicePopErrorScope(renderer->device, WebGPU_ErrorCallback, renderer);
 
