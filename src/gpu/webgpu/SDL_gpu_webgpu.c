@@ -177,6 +177,9 @@ typedef struct WebGPUBuffer
     WebGPUBufferHandle *handle;
     bool transitioned;
     Uint8 markedForDestroy;
+    bool isMapped;
+    void *mappedData;
+    SDL_AtomicInt mappingComplete;
 } WebGPUBuffer;
 
 typedef struct WebGPUBufferContainer
@@ -397,6 +400,24 @@ typedef struct WebGPURenderer
 
 // Conversion Functions:
 // ---------------------------------------------------
+
+static WGPUBufferUsageFlags SDLToWGPUBufferUsageFlags(SDL_GPUBufferUsageFlags usageFlags)
+{
+    WGPUBufferUsageFlags wgpuFlags = WGPUBufferUsage_None;
+    if (usageFlags & SDL_GPU_BUFFERUSAGE_VERTEX)
+        wgpuFlags |= WGPUBufferUsage_Vertex;
+    if (usageFlags & SDL_GPU_BUFFERUSAGE_INDEX)
+        wgpuFlags |= WGPUBufferUsage_Index;
+    if (usageFlags & SDL_GPU_BUFFERUSAGE_INDIRECT)
+        wgpuFlags |= WGPUBufferUsage_Indirect;
+    if (usageFlags & SDL_GPU_TRANSFERBUFFERUSAGE_UPLOAD) {
+        SDL_Log("WebGPU: Upload buffer usage not supported.");
+        wgpuFlags |= WGPUBufferUsage_CopySrc;
+    }
+    if (usageFlags & SDL_GPU_TRANSFERBUFFERUSAGE_DOWNLOAD)
+        wgpuFlags |= WGPUBufferUsage_CopyDst;
+    return wgpuFlags;
+}
 
 static WGPULoadOp SDLToWGPULoadOp(SDL_GPULoadOp loadOp)
 {
@@ -805,7 +826,7 @@ static WGPUPresentMode SDLToWGPUPresentMode(SDL_GPUPresentMode presentMode)
     }
 }
 
-WGPUVertexStepMode SDLToWGPUInputStepMode(SDL_GPUVertexInputRate inputRate)
+static WGPUVertexStepMode SDLToWGPUInputStepMode(SDL_GPUVertexInputRate inputRate)
 {
     switch (inputRate) {
     case SDL_GPU_VERTEXINPUTRATE_VERTEX:
@@ -817,7 +838,7 @@ WGPUVertexStepMode SDLToWGPUInputStepMode(SDL_GPUVertexInputRate inputRate)
     }
 }
 
-WGPUVertexFormat SDLToWGPUVertexFormat(SDL_GPUVertexElementFormat format)
+static WGPUVertexFormat SDLToWGPUVertexFormat(SDL_GPUVertexElementFormat format)
 {
     switch (format) {
     case SDL_GPU_VERTEXELEMENTFORMAT_FLOAT:
@@ -828,6 +849,38 @@ WGPUVertexFormat SDLToWGPUVertexFormat(SDL_GPUVertexElementFormat format)
         return WGPUVertexFormat_Float32x3;
     case SDL_GPU_VERTEXELEMENTFORMAT_FLOAT4:
         return WGPUVertexFormat_Float32x4;
+    case SDL_GPU_VERTEXELEMENTFORMAT_INT:
+        return WGPUVertexFormat_Sint32;
+    case SDL_GPU_VERTEXELEMENTFORMAT_INT2:
+        return WGPUVertexFormat_Sint32x2;
+    case SDL_GPU_VERTEXELEMENTFORMAT_INT3:
+        return WGPUVertexFormat_Sint32x3;
+    case SDL_GPU_VERTEXELEMENTFORMAT_INT4:
+        return WGPUVertexFormat_Sint32x4;
+    case SDL_GPU_VERTEXELEMENTFORMAT_UINT:
+        return WGPUVertexFormat_Uint32;
+    case SDL_GPU_VERTEXELEMENTFORMAT_UINT2:
+        return WGPUVertexFormat_Uint32x2;
+    case SDL_GPU_VERTEXELEMENTFORMAT_UINT3:
+        return WGPUVertexFormat_Uint32x3;
+    case SDL_GPU_VERTEXELEMENTFORMAT_UINT4:
+        return WGPUVertexFormat_Uint32x4;
+    case SDL_GPU_VERTEXELEMENTFORMAT_BYTE2_NORM:
+        return WGPUVertexFormat_Snorm8x2;
+    case SDL_GPU_VERTEXELEMENTFORMAT_BYTE4_NORM:
+        return WGPUVertexFormat_Snorm8x4;
+    case SDL_GPU_VERTEXELEMENTFORMAT_UBYTE2_NORM:
+        return WGPUVertexFormat_Unorm8x2;
+    case SDL_GPU_VERTEXELEMENTFORMAT_UBYTE4_NORM:
+        return WGPUVertexFormat_Unorm8x4;
+    case SDL_GPU_VERTEXELEMENTFORMAT_SHORT2:
+        return WGPUVertexFormat_Sint16x2;
+    case SDL_GPU_VERTEXELEMENTFORMAT_SHORT4:
+        return WGPUVertexFormat_Sint16x4;
+    case SDL_GPU_VERTEXELEMENTFORMAT_USHORT2:
+        return WGPUVertexFormat_Uint16x2;
+    case SDL_GPU_VERTEXELEMENTFORMAT_USHORT4:
+        return WGPUVertexFormat_Uint16x4;
     default:
         return WGPUVertexFormat_Undefined;
     }
@@ -1072,7 +1125,7 @@ static bool WebGPU_INTERNAL_OnWindowResize(void *userdata, SDL_Event *event)
     return true;
 }
 
-SDL_GPUCommandBuffer *WebGPU_AcquireCommandBuffer(SDL_GPURenderer *driverData)
+static SDL_GPUCommandBuffer *WebGPU_AcquireCommandBuffer(SDL_GPURenderer *driverData)
 {
     WebGPURenderer *renderer = (WebGPURenderer *)driverData;
     WebGPUCommandBuffer *commandBuffer = SDL_malloc(sizeof(WebGPUCommandBuffer));
@@ -1093,7 +1146,7 @@ SDL_GPUCommandBuffer *WebGPU_AcquireCommandBuffer(SDL_GPURenderer *driverData)
     return (SDL_GPUCommandBuffer *)commandBuffer;
 }
 
-bool WebGPU_Submit(SDL_GPUCommandBuffer *commandBuffer)
+static bool WebGPU_Submit(SDL_GPUCommandBuffer *commandBuffer)
 {
     WebGPUCommandBuffer *webgpuCommandBuffer = (WebGPUCommandBuffer *)commandBuffer;
     WebGPURenderer *renderer = webgpuCommandBuffer->renderer;
@@ -1117,10 +1170,10 @@ bool WebGPU_Submit(SDL_GPUCommandBuffer *commandBuffer)
     return true;
 }
 
-void WebGPU_BeginRenderPass(SDL_GPUCommandBuffer *commandBuffer,
-                            const SDL_GPUColorTargetInfo *colorAttachmentInfos,
-                            Uint32 colorAttachmentCount,
-                            const SDL_GPUDepthStencilTargetInfo *depthStencilAttachmentInfo)
+static void WebGPU_BeginRenderPass(SDL_GPUCommandBuffer *commandBuffer,
+                                   const SDL_GPUColorTargetInfo *colorAttachmentInfos,
+                                   Uint32 colorAttachmentCount,
+                                   const SDL_GPUDepthStencilTargetInfo *depthStencilAttachmentInfo)
 {
     WebGPUCommandBuffer *webgpuCommandBuffer = (WebGPUCommandBuffer *)commandBuffer;
     WebGPUTexture *texture = NULL;
@@ -1181,13 +1234,30 @@ void WebGPU_BeginRenderPass(SDL_GPUCommandBuffer *commandBuffer,
     webgpuCommandBuffer->renderPassEncoder = wgpuCommandEncoderBeginRenderPass(webgpuCommandBuffer->commandEncoder, &renderPassDesc);
 }
 
-void WebGPU_EndRenderPass(SDL_GPUCommandBuffer *commandBuffer)
+static void WebGPU_EndRenderPass(SDL_GPUCommandBuffer *commandBuffer)
 {
     WebGPUCommandBuffer *webgpuCommandBuffer = (WebGPUCommandBuffer *)commandBuffer;
     wgpuRenderPassEncoderEnd(webgpuCommandBuffer->renderPassEncoder);
     wgpuRenderPassEncoderRelease(webgpuCommandBuffer->renderPassEncoder);
 }
 
+static void WebGPU_BeginCopyPass(SDL_GPUCommandBuffer *commandBuffer)
+{
+    WebGPUCommandBuffer *webgpuCommandBuffer = (WebGPUCommandBuffer *)commandBuffer;
+    WGPUCommandEncoderDescriptor commandEncoderDesc = {
+        .label = "SDL_GPU Copy Encoder",
+    };
+    webgpuCommandBuffer->commandEncoder = wgpuDeviceCreateCommandEncoder(webgpuCommandBuffer->renderer->device, &commandEncoderDesc);
+}
+
+static void WebGPU_EndCopyPass(SDL_GPUCommandBuffer *commandBuffer)
+{
+    (void)commandBuffer;
+    // No need to do anything here, everything is handled in Submit for WGPU
+}
+
+// Swapchain & Window Related Functions
+// ---------------------------------------------------
 bool WebGPU_INTERNAL_CreateSurface(WebGPURenderer *renderer, WindowData *windowData)
 {
     WGPUSurfaceDescriptorFromCanvasHTMLSelector canvas_desc = {
@@ -1455,7 +1525,246 @@ static void WebGPU_ReleaseWindow(SDL_GPURenderer *driverData, SDL_Window *window
     SDL_RemoveEventWatch(WebGPU_INTERNAL_OnWindowResize, window);
 }
 
-SDL_GPUShader *WebGPU_CreateShader(
+// Buffer Management Functions
+// ---------------------------------------------------
+static SDL_GPUBuffer *WebGPU_INTERNAL_CreateGPUBuffer(SDL_GPURenderer *driverData,
+                                                      void *usageFlags,
+                                                      Uint32 size, WebGPUBufferType type)
+{
+    WebGPUBuffer *buffer = SDL_calloc(1, sizeof(WebGPUBuffer));
+    buffer->size = size;
+
+    WGPUBufferUsageFlags wgpuUsage = 0;
+    if (type == WEBGPU_BUFFER_TYPE_TRANSFER) {
+        // VERIFY ALL OF THESE IF THERE ARE BUGS. I BELIEVE THIS IS CORRECT HOWEVER
+        SDL_GPUTransferBufferUsage sdlFlags = *((SDL_GPUTransferBufferUsage *)usageFlags);
+        if (sdlFlags == SDL_GPU_TRANSFERBUFFERUSAGE_UPLOAD) {
+            SDL_Log("Creating upload transfer buffer");
+            wgpuUsage = WGPUBufferUsage_MapWrite | WGPUBufferUsage_CopySrc;
+        } else if (sdlFlags == SDL_GPU_TRANSFERBUFFERUSAGE_DOWNLOAD) {
+            SDL_Log("Creating download transfer buffer");
+            wgpuUsage = WGPUBufferUsage_MapRead | WGPUBufferUsage_CopyDst;
+        }
+    } else {
+        SDL_Log("Creating GPU buffer");
+        wgpuUsage = SDLToWGPUBufferUsageFlags(*(SDL_GPUBufferUsageFlags *)usageFlags);
+    }
+
+    buffer->usageFlags = *((SDL_GPUBufferUsageFlags *)usageFlags);
+    SDL_SetAtomicInt(&buffer->mappingComplete, 0);
+
+    SDL_Log("Creating buffer with usage flags: %d", wgpuUsage);
+    WGPUBufferDescriptor bufferDesc = {
+        .usage = wgpuUsage,
+        .size = size,
+        .mappedAtCreation = false, // The programmer will map the buffer when they need to write to it
+    };
+
+    buffer->buffer = wgpuDeviceCreateBuffer(((WebGPURenderer *)driverData)->device, &bufferDesc);
+    buffer->type = type;
+    buffer->markedForDestroy = false;
+    buffer->isMapped = false;
+
+    return (SDL_GPUBuffer *)buffer;
+}
+
+static SDL_GPUBuffer *WebGPU_CreateGPUBuffer(SDL_GPURenderer *driverData,
+                                             SDL_GPUBufferUsageFlags usageFlags,
+                                             Uint32 size)
+{
+    return WebGPU_INTERNAL_CreateGPUBuffer(driverData, (void *)&usageFlags, size, WEBGPU_BUFFER_TYPE_GPU);
+}
+
+static void WebGPU_ReleaseBuffer(SDL_GPURenderer *driverData, SDL_GPUBuffer *buffer)
+{
+    WebGPUBuffer *webgpuBuffer = (WebGPUBuffer *)buffer;
+    if (webgpuBuffer->buffer) {
+        wgpuBufferRelease(webgpuBuffer->buffer);
+    }
+    SDL_free(webgpuBuffer);
+}
+
+static SDL_GPUTransferBuffer *WebGPU_CreateTransferBuffer(
+    SDL_GPURenderer *driverData,
+    SDL_GPUTransferBufferUsage usage, // ignored on Vulkan
+    Uint32 size)
+{
+    return (SDL_GPUTransferBuffer *)WebGPU_INTERNAL_CreateGPUBuffer(driverData, &usage, size, WEBGPU_BUFFER_TYPE_TRANSFER);
+}
+
+static void WebGPU_ReleaseTransferBuffer(SDL_GPURenderer *driverData, SDL_GPUTransferBuffer *transferBuffer)
+{
+    WebGPUBuffer *webgpuBuffer = (WebGPUBuffer *)transferBuffer;
+    if (webgpuBuffer->buffer) {
+        wgpuBufferRelease(webgpuBuffer->buffer);
+    }
+    SDL_free(webgpuBuffer);
+}
+
+static void WebGPU_INTERNAL_MapTransferBuffer(WGPUBufferMapAsyncStatus status, void *userdata)
+{
+    WebGPUBuffer *buffer = (WebGPUBuffer *)userdata;
+
+    if (status != WGPUBufferMapAsyncStatus_Success) {
+        SDL_LogError(SDL_LOG_CATEGORY_GPU, "Failed to map buffer: status %d", status);
+        buffer->mappedData = NULL;
+    } else {
+        buffer->mappedData = wgpuBufferGetMappedRange(buffer->buffer, 0, buffer->size);
+        if (!buffer->mappedData) {
+            SDL_LogError(SDL_LOG_CATEGORY_GPU, "Failed to get mapped range of buffer");
+        }
+    }
+
+    buffer->isMapped = (buffer->mappedData != NULL);
+
+    SDL_Log("Buffer mapped: %d", buffer->isMapped);
+
+    // Signal that the mapping operation is complete
+    SDL_SetAtomicInt(&buffer->mappingComplete, 1);
+}
+
+static void *WebGPU_MapTransferBuffer(
+    SDL_GPURenderer *driverData,
+    SDL_GPUTransferBuffer *transferBuffer,
+    bool cycle)
+{
+    WebGPURenderer *renderer = (WebGPURenderer *)driverData;
+    WebGPUBuffer *buffer = (WebGPUBuffer *)transferBuffer;
+
+    (void)cycle;
+
+    if (!buffer || !buffer->buffer) {
+        SDL_SetError("Invalid buffer");
+        return NULL;
+    }
+
+    if (buffer->type != WEBGPU_BUFFER_TYPE_TRANSFER) {
+        SDL_SetError("Buffer is not a transfer buffer");
+        return NULL;
+    }
+
+    const Uint32 TIMEOUT_MS = 1000; // 1 second timeout
+    Uint32 startTime = SDL_GetTicks();
+
+    // Reset mapped state
+    buffer->isMapped = false;
+    buffer->mappedData = NULL;
+    SDL_SetAtomicInt(&buffer->mappingComplete, 0);
+
+    // Start async mapping
+    wgpuBufferMapAsync(buffer->buffer, WGPUMapMode_Write, 0, buffer->size,
+                       WebGPU_INTERNAL_MapTransferBuffer, buffer);
+
+    // Poll for completion
+    while (!SDL_GetAtomicInt(&buffer->mappingComplete)) {
+        if (SDL_GetTicks() - startTime > TIMEOUT_MS) {
+            SDL_SetError("Buffer mapping timed out");
+            return NULL;
+        }
+
+        SDL_Log("Waiting for buffer mapping to complete");
+
+        // Small delay to prevent busy-waiting
+        SDL_Delay(1);
+    }
+
+    return buffer->mappedData;
+}
+
+static void WebGPU_UnmapTransferBuffer(
+    SDL_GPURenderer *driverData,
+    SDL_GPUTransferBuffer *transferBuffer)
+{
+    WebGPUBuffer *buffer = (WebGPUBuffer *)transferBuffer;
+
+    if (buffer && buffer->buffer) {
+        wgpuBufferUnmap(buffer->buffer);
+        buffer->isMapped = false;
+    }
+
+    (void)driverData;
+}
+
+static void WebGPU_UploadToBuffer(SDL_GPUCommandBuffer *commandBuffer,
+                                  const SDL_GPUTransferBufferLocation *source,
+                                  const SDL_GPUBufferRegion *destination,
+                                  bool cycle)
+{
+    if (!commandBuffer || !source || !destination) {
+        SDL_SetError("Invalid parameters for buffer upload");
+        return;
+    }
+
+    WebGPUCommandBuffer *webgpuCmdBuffer = (WebGPUCommandBuffer *)commandBuffer;
+    WebGPUBuffer *srcBuffer = (WebGPUBuffer *)source->transfer_buffer;
+    WebGPUBuffer *dstBuffer = (WebGPUBuffer *)destination->buffer;
+
+    if (!srcBuffer || !srcBuffer->buffer || !dstBuffer || !dstBuffer->buffer) {
+        SDL_SetError("Invalid source or destination buffer");
+        return;
+    }
+
+    if (source->offset + destination->size > srcBuffer->size ||
+        destination->offset + destination->size > dstBuffer->size) {
+        SDL_SetError("Buffer upload region out of bounds");
+        return;
+    }
+
+    (void)cycle;
+
+    WGPUCommandEncoder encoder = webgpuCmdBuffer->commandEncoder;
+
+    wgpuCommandEncoderCopyBufferToBuffer(
+        encoder,
+        srcBuffer->buffer,
+        source->offset,
+        dstBuffer->buffer,
+        destination->offset,
+        destination->size);
+}
+
+static void WebGPU_BindVertexBuffers(
+    SDL_GPUCommandBuffer *commandBuffer,
+    Uint32 firstSlot,
+    const SDL_GPUBufferBinding *bindings,
+    Uint32 numBindings)
+{
+    if (!commandBuffer || !bindings || numBindings == 0) {
+        SDL_SetError("Invalid parameters for binding vertex buffers");
+        return;
+    }
+
+    WebGPUCommandBuffer *webgpuCmdBuffer = (WebGPUCommandBuffer *)commandBuffer;
+
+    // Ensure we're inside a render pass
+    if (!webgpuCmdBuffer->renderPassEncoder) {
+        SDL_SetError("Cannot bind vertex buffers outside of a render pass");
+        return;
+    }
+
+    // WebGPU requires us to set vertex buffers individually
+    for (Uint32 i = 0; i < numBindings; i++) {
+        const SDL_GPUBufferBinding *binding = &bindings[i];
+        WebGPUBuffer *buffer = (WebGPUBuffer *)binding->buffer;
+
+        if (!buffer || !buffer->buffer) {
+            SDL_SetError("Invalid buffer at binding %u", i);
+            continue;
+        }
+
+        wgpuRenderPassEncoderSetVertexBuffer(
+            webgpuCmdBuffer->renderPassEncoder,
+            firstSlot + i,                                     // slot
+            buffer->buffer,                                    // buffer
+            binding->offset,                                   // offset
+            buffer->size == 0 ? WGPU_WHOLE_SIZE : buffer->size // size
+        );
+    }
+}
+
+// Shader Functions
+// ---------------------------------------------------
+static SDL_GPUShader *WebGPU_CreateShader(
     SDL_GPURenderer *driverData,
     const SDL_GPUShaderCreateInfo *shaderCreateInfo)
 {
@@ -1592,7 +1901,7 @@ static WGPUVertexBufferLayout *SDL_WGPU_INTERNAL_CreateVertexBufferLayouts(const
             buffer_attributes = NULL;
             SDL_Log("No attributes found for vertex buffer %d", i);
         } else {
-            buffer_attributes = SDL_malloc(sizeof(WGPUVertexAttribute *) * numAttributes);
+            buffer_attributes = SDL_malloc(sizeof(WGPUVertexAttribute) * numAttributes);
             if (buffer_attributes == NULL) {
                 SDL_OutOfMemory();
                 return NULL;
@@ -1602,8 +1911,8 @@ static WGPUVertexBufferLayout *SDL_WGPU_INTERNAL_CreateVertexBufferLayouts(const
             // Iterate through the vertex attributes and populate the attributes array
             for (Uint32 j = 0; j < vertexInputState->num_vertex_attributes; j += 1) {
                 if (attribute_buffer_indices[j] == i) {
-                    // Set the pointer to the appropriate attribute in the buffer
-                    buffer_attributes[count] = attributes[j];
+                    // We need to make an explicit copy of the attribute to avoid issues with the original being freed
+                    memcpy(&buffer_attributes[count], &attributes[j], sizeof(WGPUVertexAttribute));
                     count += 1;
                 }
             } // End attribute iteration
@@ -1619,6 +1928,9 @@ static WGPUVertexBufferLayout *SDL_WGPU_INTERNAL_CreateVertexBufferLayouts(const
             .attributes = buffer_attributes,
         };
     }
+
+    // Free the initial attributes array
+    SDL_free(attributes);
 
     // Return a pointer to the head of the vertex buffer layouts
     return vertexBufferLayouts;
@@ -2050,6 +2362,16 @@ static SDL_GPUDevice *WebGPU_CreateDevice(bool debug, bool preferLowPower, SDL_P
     result->AcquireSwapchainTexture = WebGPU_AcquireSwapchainTexture;
     result->GetSwapchainTextureFormat = WebGPU_GetSwapchainTextureFormat;
 
+    result->CreateBuffer = WebGPU_CreateGPUBuffer;
+    result->ReleaseBuffer = WebGPU_ReleaseBuffer;
+    result->CreateTransferBuffer = WebGPU_CreateTransferBuffer;
+    result->ReleaseTransferBuffer = WebGPU_ReleaseTransferBuffer;
+    result->MapTransferBuffer = WebGPU_MapTransferBuffer;
+    result->UnmapTransferBuffer = WebGPU_UnmapTransferBuffer;
+    result->UploadToBuffer = WebGPU_UploadToBuffer;
+
+    result->BindVertexBuffers = WebGPU_BindVertexBuffers;
+
     result->CreateShader = WebGPU_CreateShader;
     result->ReleaseShader = WebGPU_ReleaseShader;
 
@@ -2067,6 +2389,8 @@ static SDL_GPUDevice *WebGPU_CreateDevice(bool debug, bool preferLowPower, SDL_P
     result->Submit = WebGPU_Submit;
     result->BeginRenderPass = WebGPU_BeginRenderPass;
     result->EndRenderPass = WebGPU_EndRenderPass;
+    result->BeginCopyPass = WebGPU_BeginCopyPass;
+    result->EndCopyPass = WebGPU_EndCopyPass;
 
     return result;
 }
