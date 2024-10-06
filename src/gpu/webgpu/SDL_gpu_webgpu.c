@@ -357,6 +357,7 @@ typedef struct WebGPURenderer WebGPURenderer;
 // Renderer's command buffer structure
 typedef struct WebGPUCommandBuffer
 {
+    WGPUDevice device;
     CommandBufferCommonHeader common;
     WebGPURenderer *renderer;
 
@@ -405,7 +406,7 @@ static WGPUBufferUsageFlags SDLToWGPUBufferUsageFlags(SDL_GPUBufferUsageFlags us
 {
     WGPUBufferUsageFlags wgpuFlags = WGPUBufferUsage_None;
     if (usageFlags & SDL_GPU_BUFFERUSAGE_VERTEX)
-        wgpuFlags |= WGPUBufferUsage_Vertex;
+        wgpuFlags |= WGPUBufferUsage_Vertex | WGPUBufferUsage_CopyDst;
     if (usageFlags & SDL_GPU_BUFFERUSAGE_INDEX)
         wgpuFlags |= WGPUBufferUsage_Index;
     if (usageFlags & SDL_GPU_BUFFERUSAGE_INDIRECT)
@@ -415,7 +416,7 @@ static WGPUBufferUsageFlags SDLToWGPUBufferUsageFlags(SDL_GPUBufferUsageFlags us
         wgpuFlags |= WGPUBufferUsage_CopySrc;
     }
     if (usageFlags & SDL_GPU_TRANSFERBUFFERUSAGE_DOWNLOAD)
-        wgpuFlags |= WGPUBufferUsage_CopyDst;
+        wgpuFlags |= WGPUBufferUsage_CopyDst | WGPUBufferUsage_CopySrc;
     return wgpuFlags;
 }
 
@@ -1061,7 +1062,26 @@ static WebGPUPipelineResourceLayout *CreateResourceLayoutFromReflection(
 // Simple Error Callback for WebGPU
 static void WebGPU_ErrorCallback(WGPUErrorType type, const char *message, void *userdata)
 {
-    SDL_SetError("WebGPU error: %s", message);
+    const char *errorTypeStr;
+    switch (type) {
+    case WGPUErrorType_Validation:
+        errorTypeStr = "Validation Error";
+        break;
+    case WGPUErrorType_OutOfMemory:
+        errorTypeStr = "Out of Memory Error";
+        break;
+    case WGPUErrorType_Unknown:
+        errorTypeStr = "Unknown Error";
+        break;
+    case WGPUErrorType_DeviceLost:
+        errorTypeStr = "Device Lost Error";
+        break;
+    default:
+        errorTypeStr = "Unhandled Error Type";
+        break;
+    }
+    // Output the error information to the console
+    printf("[%s]: %s\n", errorTypeStr, message);
 }
 
 // Device Request Callback for when the device is requested from the adapter
@@ -1136,6 +1156,8 @@ static SDL_GPUCommandBuffer *WebGPU_AcquireCommandBuffer(SDL_GPURenderer *driver
     height = renderer->claimedWindows[0]->window->h;
     commandBuffer->currentViewport = (WebGPUViewport){ 0, 0, width, height, 0.0, 1.0 };
     commandBuffer->currentScissor = (WebGPURect){ 0, 0, width, height };
+
+    SDL_memcpy(&commandBuffer->device, &renderer->device, sizeof(WGPUDevice *));
 
     WGPUCommandEncoderDescriptor commandEncoderDesc = {
         .label = "SDL_GPU Command Encoder",
@@ -1608,16 +1630,12 @@ static void WebGPU_INTERNAL_MapTransferBuffer(WGPUBufferMapAsyncStatus status, v
     if (status != WGPUBufferMapAsyncStatus_Success) {
         SDL_LogError(SDL_LOG_CATEGORY_GPU, "Failed to map buffer: status %d", status);
         buffer->mappedData = NULL;
+        buffer->isMapped = false;
     } else {
-        buffer->mappedData = wgpuBufferGetMappedRange(buffer->buffer, 0, buffer->size);
-        if (!buffer->mappedData) {
-            SDL_LogError(SDL_LOG_CATEGORY_GPU, "Failed to get mapped range of buffer");
-        }
+        buffer->isMapped = true;
     }
 
-    buffer->isMapped = (buffer->mappedData != NULL);
-
-    SDL_Log("Buffer mapped: %d", buffer->isMapped);
+    /*buffer->isMapped = (buffer->mappedData != NULL);*/
 
     // Signal that the mapping operation is complete
     SDL_SetAtomicInt(&buffer->mappingComplete, 1);
@@ -1628,7 +1646,6 @@ static void *WebGPU_MapTransferBuffer(
     SDL_GPUTransferBuffer *transferBuffer,
     bool cycle)
 {
-    WebGPURenderer *renderer = (WebGPURenderer *)driverData;
     WebGPUBuffer *buffer = (WebGPUBuffer *)transferBuffer;
 
     (void)cycle;
@@ -1651,8 +1668,10 @@ static void *WebGPU_MapTransferBuffer(
     buffer->mappedData = NULL;
     SDL_SetAtomicInt(&buffer->mappingComplete, 0);
 
+    WGPUMapMode mapMode = buffer->usageFlags == SDL_GPU_TRANSFERBUFFERUSAGE_UPLOAD ? WGPUMapMode_Write : WGPUMapMode_Read;
+
     // Start async mapping
-    wgpuBufferMapAsync(buffer->buffer, WGPUMapMode_Write, 0, buffer->size,
+    wgpuBufferMapAsync(buffer->buffer, mapMode, 0, buffer->size,
                        WebGPU_INTERNAL_MapTransferBuffer, buffer);
 
     // Poll for completion
@@ -1668,7 +1687,14 @@ static void *WebGPU_MapTransferBuffer(
         SDL_Delay(1);
     }
 
-    return buffer->mappedData;
+    void *mappedData;
+    if (mapMode == WGPUMapMode_Read) {
+        mappedData = (void *)wgpuBufferGetConstMappedRange(buffer->buffer, 0, buffer->size);
+    } else {
+        mappedData = wgpuBufferGetMappedRange(buffer->buffer, 0, buffer->size);
+    }
+
+    return mappedData;
 }
 
 static void WebGPU_UnmapTransferBuffer(
@@ -1700,13 +1726,13 @@ static void WebGPU_UploadToBuffer(SDL_GPUCommandBuffer *commandBuffer,
     WebGPUBuffer *dstBuffer = (WebGPUBuffer *)destination->buffer;
 
     if (!srcBuffer || !srcBuffer->buffer || !dstBuffer || !dstBuffer->buffer) {
-        SDL_SetError("Invalid source or destination buffer");
+        SDL_LogError(SDL_LOG_CATEGORY_GPU, "Invalid buffer");
         return;
     }
 
     if (source->offset + destination->size > srcBuffer->size ||
         destination->offset + destination->size > dstBuffer->size) {
-        SDL_SetError("Buffer upload region out of bounds");
+        SDL_LogError(SDL_LOG_CATEGORY_GPU, "Invalid buffer region");
         return;
     }
 
@@ -1721,6 +1747,46 @@ static void WebGPU_UploadToBuffer(SDL_GPUCommandBuffer *commandBuffer,
         dstBuffer->buffer,
         destination->offset,
         destination->size);
+
+    SDL_Log("Uploaded %u bytes from buffer %p to buffer %p", destination->size, srcBuffer->buffer, dstBuffer->buffer);
+}
+
+static void WebGPU_DownloadFromBuffer(
+        SDL_GPUCommandBuffer *commandBuffer,
+        const SDL_GPUBufferRegion *source,
+        const SDL_GPUTransferBufferLocation *destination)
+{
+    if (!commandBuffer || !source || !destination) {
+        SDL_SetError("Invalid parameters for buffer download");
+        return;
+    }
+
+    WebGPUCommandBuffer *webgpuCmdBuffer = (WebGPUCommandBuffer *)commandBuffer;
+    WebGPUBuffer *srcBuffer = (WebGPUBuffer *)source->buffer;
+    WebGPUBuffer *dstBuffer = (WebGPUBuffer *)destination->transfer_buffer;
+
+    if (!srcBuffer || !srcBuffer->buffer || !dstBuffer || !dstBuffer->buffer) {
+        SDL_LogError(SDL_LOG_CATEGORY_GPU, "Invalid buffer");
+        return;
+    }
+
+    if (source->offset + source->size > srcBuffer->size ||
+        destination->offset + source->size > dstBuffer->size) {
+        SDL_LogError(SDL_LOG_CATEGORY_GPU, "Invalid buffer region");
+        return;
+    }
+
+    WGPUCommandEncoder encoder = webgpuCmdBuffer->commandEncoder;
+
+    wgpuCommandEncoderCopyBufferToBuffer(
+        encoder,
+        srcBuffer->buffer,
+        source->offset,
+        dstBuffer->buffer,
+        destination->offset,
+        source->size);
+
+    SDL_Log("Downloaded %u bytes from buffer %p to buffer %p", source->size, srcBuffer->buffer, dstBuffer->buffer);
 }
 
 static void WebGPU_BindVertexBuffers(
@@ -1751,6 +1817,8 @@ static void WebGPU_BindVertexBuffers(
             SDL_SetError("Invalid buffer at binding %u", i);
             continue;
         }
+
+        /*SDL_Log("Binding vertex buffer %p to slot %u", buffer->buffer, firstSlot + i);*/
 
         wgpuRenderPassEncoderSetVertexBuffer(
             webgpuCmdBuffer->renderPassEncoder,
@@ -2059,6 +2127,7 @@ static SDL_GPUGraphicsPipeline *WebGPU_CreateGraphicsPipeline(
 
     // Create the render pipeline descriptor
     WGPURenderPipelineDescriptor pipelineDesc = {
+        .nextInChain = NULL,
         .label = "SDL_GPU WebGPU Render Pipeline",
         .layout = pipelineLayout,
         .vertex = vertexState,
@@ -2106,10 +2175,22 @@ static SDL_GPUGraphicsPipeline *WebGPU_CreateGraphicsPipeline(
         SDL_free(bufferLayout);
     }
 
-    wgpuDevicePopErrorScope(renderer->device, WebGPU_ErrorCallback, renderer);
-
     SDL_Log("Graphics Pipeline Created Successfully");
     return (SDL_GPUGraphicsPipeline *)pipeline;
+}
+
+static void WebGPU_ReleaseGraphicsPipeline(SDL_GPURenderer *driverData,
+                                           SDL_GPUGraphicsPipeline *graphicsPipeline)
+{
+    WebGPUGraphicsPipeline *pipeline = (WebGPUGraphicsPipeline *)graphicsPipeline;
+    SDL_AtomicDecRef(&pipeline->referenceCount);
+
+    if (pipeline->pipeline) {
+        if (SDL_GetAtomicInt(&pipeline->referenceCount) == 0){
+            wgpuRenderPipelineRelease(pipeline->pipeline);
+            pipeline->pipeline = NULL;
+        }
+    }
 }
 
 // Helper function to create or update a bind group
@@ -2263,13 +2344,7 @@ static void WebGPU_DrawPrimitives(
     Uint32 firstInstance)
 {
     WebGPUCommandBuffer *wgpuCommandBuffer = (WebGPUCommandBuffer *)commandBuffer;
-
-    // TODO: I need to implement some kind of descriptor set system to ensure that we can bind all necessary data before proceeding with the RenderPass. Too tired to do this on a plane.
-    wgpuDevicePushErrorScope(wgpuCommandBuffer->renderer->device, WGPUErrorFilter_Validation);
-
     wgpuRenderPassEncoderDraw(wgpuCommandBuffer->renderPassEncoder, vertexCount, instanceCount, firstVertex, firstInstance);
-
-    wgpuDevicePopErrorScope(wgpuCommandBuffer->renderer->device, WebGPU_ErrorCallback, wgpuCommandBuffer);
 }
 
 static bool WebGPU_PrepareDriver(SDL_VideoDevice *_this)
@@ -2335,7 +2410,6 @@ static SDL_GPUDevice *WebGPU_CreateDevice(bool debug, bool preferLowPower, SDL_P
 
     /*// Set our error callback for emscripten*/
     wgpuDeviceSetUncapturedErrorCallback(renderer->device, WebGPU_ErrorCallback, renderer);
-    wgpuDevicePushErrorScope(renderer->device, WGPUErrorFilter_Validation);
 
     /*emscripten_set_fullscreenchange_callback(EMSCRIPTEN_EVENT_TARGET_WINDOW, NULL, true, emsc_fullscreen_callback);*/
 
@@ -2369,6 +2443,7 @@ static SDL_GPUDevice *WebGPU_CreateDevice(bool debug, bool preferLowPower, SDL_P
     result->MapTransferBuffer = WebGPU_MapTransferBuffer;
     result->UnmapTransferBuffer = WebGPU_UnmapTransferBuffer;
     result->UploadToBuffer = WebGPU_UploadToBuffer;
+    result->DownloadFromBuffer = WebGPU_DownloadFromBuffer;
 
     result->BindVertexBuffers = WebGPU_BindVertexBuffers;
 
@@ -2379,6 +2454,7 @@ static SDL_GPUDevice *WebGPU_CreateDevice(bool debug, bool preferLowPower, SDL_P
 
     result->CreateGraphicsPipeline = WebGPU_CreateGraphicsPipeline;
     result->BindGraphicsPipeline = WebGPU_BindGraphicsPipeline;
+    result->ReleaseGraphicsPipeline = WebGPU_ReleaseGraphicsPipeline;
     result->DrawPrimitives = WebGPU_DrawPrimitives;
 
     // TODO END
