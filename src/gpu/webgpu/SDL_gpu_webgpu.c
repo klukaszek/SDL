@@ -1740,6 +1740,8 @@ static void WebGPU_UploadToBuffer(SDL_GPUCommandBuffer *commandBuffer,
 
     WGPUCommandEncoder encoder = webgpuCmdBuffer->commandEncoder;
 
+    SDL_Log("Uploading %u bytes from buffer %p to buffer %p", destination->size, srcBuffer->buffer, dstBuffer->buffer);
+
     wgpuCommandEncoderCopyBufferToBuffer(
         encoder,
         srcBuffer->buffer,
