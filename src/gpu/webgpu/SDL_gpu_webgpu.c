@@ -406,17 +406,11 @@ static WGPUBufferUsageFlags SDLToWGPUBufferUsageFlags(SDL_GPUBufferUsageFlags us
 {
     WGPUBufferUsageFlags wgpuFlags = WGPUBufferUsage_None;
     if (usageFlags & SDL_GPU_BUFFERUSAGE_VERTEX)
-        wgpuFlags |= WGPUBufferUsage_Vertex | WGPUBufferUsage_CopyDst;
+        wgpuFlags |= WGPUBufferUsage_Vertex | WGPUBufferUsage_CopyDst | WGPUBufferUsage_CopySrc;
     if (usageFlags & SDL_GPU_BUFFERUSAGE_INDEX)
         wgpuFlags |= WGPUBufferUsage_Index;
     if (usageFlags & SDL_GPU_BUFFERUSAGE_INDIRECT)
         wgpuFlags |= WGPUBufferUsage_Indirect;
-    if (usageFlags & SDL_GPU_TRANSFERBUFFERUSAGE_UPLOAD) {
-        SDL_Log("WebGPU: Upload buffer usage not supported.");
-        wgpuFlags |= WGPUBufferUsage_CopySrc;
-    }
-    if (usageFlags & SDL_GPU_TRANSFERBUFFERUSAGE_DOWNLOAD)
-        wgpuFlags |= WGPUBufferUsage_CopyDst | WGPUBufferUsage_CopySrc;
     return wgpuFlags;
 }
 
@@ -1635,8 +1629,6 @@ static void WebGPU_INTERNAL_MapTransferBuffer(WGPUBufferMapAsyncStatus status, v
         buffer->isMapped = true;
     }
 
-    /*buffer->isMapped = (buffer->mappedData != NULL);*/
-
     // Signal that the mapping operation is complete
     SDL_SetAtomicInt(&buffer->mappingComplete, 1);
 }
@@ -1685,6 +1677,11 @@ static void *WebGPU_MapTransferBuffer(
 
         // Small delay to prevent busy-waiting
         SDL_Delay(1);
+    }
+
+    if (!buffer->isMapped) {
+        SDL_SetError("Failed to map buffer");
+        return NULL;
     }
 
     void *mappedData;
@@ -1742,11 +1739,14 @@ static void WebGPU_UploadToBuffer(SDL_GPUCommandBuffer *commandBuffer,
 
     SDL_Log("Uploading %u bytes from buffer %p to buffer %p", destination->size, srcBuffer->buffer, dstBuffer->buffer);
 
+    WGPUBuffer dstBufferHandle;
+    SDL_memcpy(&dstBufferHandle, &dstBuffer->buffer, sizeof(WGPUBuffer *));
+
     wgpuCommandEncoderCopyBufferToBuffer(
         encoder,
         srcBuffer->buffer,
         source->offset,
-        dstBuffer->buffer,
+        dstBufferHandle,
         destination->offset,
         destination->size);
 
