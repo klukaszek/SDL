@@ -1653,7 +1653,7 @@ static void *WebGPU_MapTransferBuffer(
         return NULL;
     }
 
-    const Uint32 TIMEOUT_MS = 1000; // 1 second timeout
+    const Uint32 TIMEOUT = 1000;
     Uint32 startTime = SDL_GetTicks();
 
     // Reset mapped state
@@ -1668,16 +1668,14 @@ static void *WebGPU_MapTransferBuffer(
                        WebGPU_INTERNAL_MapTransferBuffer, buffer);
 
     // Poll for completion
-    while (!SDL_GetAtomicInt(&buffer->mappingComplete)) {
-        if (SDL_GetTicks() - startTime > TIMEOUT_MS) {
+    while (SDL_GetAtomicInt(&buffer->mappingComplete) != 1) {
+        if (SDL_GetTicks() - startTime > TIMEOUT) {
             SDL_SetError("Buffer mapping timed out");
             return NULL;
         }
 
+        emscripten_sleep(1);
         SDL_Log("Waiting for buffer mapping to complete");
-
-        // Small delay to prevent busy-waiting
-        SDL_Delay(1);
     }
 
     if (!buffer->isMapped) {
@@ -2063,16 +2061,7 @@ static SDL_GPUGraphicsPipeline *WebGPU_CreateGraphicsPipeline(
 
     // Create the vertex state for the render pipeline
     WGPUVertexState vertexState = {
-        .module = wgpuDeviceCreateShaderModule(renderer->device, &(WGPUShaderModuleDescriptor){
-                                                                     .label = "SDL_GPU WebGPU Vertex Shader",
-                                                                     .nextInChain = (void *)&(WGPUShaderModuleWGSLDescriptor){
-                                                                         .chain = {
-                                                                             .next = NULL,
-                                                                             .sType = WGPUSType_ShaderModuleWGSLDescriptor,
-                                                                         },
-                                                                         .code = vertShader->wgslSource,
-                                                                     },
-                                                                 }),
+        .module = vertShader->shaderModule,
         .entryPoint = vertShader->entrypoint,
         .bufferCount = pipelineCreateInfo->vertex_input_state.num_vertex_buffers,
         .buffers = vertexBufferLayouts,
