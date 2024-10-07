@@ -1564,6 +1564,7 @@ static SDL_GPUBuffer *WebGPU_INTERNAL_CreateGPUBuffer(SDL_GPURenderer *driverDat
     } else {
         SDL_Log("Creating GPU buffer");
         wgpuUsage = SDLToWGPUBufferUsageFlags(*(SDL_GPUBufferUsageFlags *)usageFlags);
+        wgpuUsage |= WGPUBufferUsage_CopyDst | WGPUBufferUsage_CopySrc;
     }
 
     buffer->usageFlags = *((SDL_GPUBufferUsageFlags *)usageFlags);
