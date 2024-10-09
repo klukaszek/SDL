@@ -357,7 +357,6 @@ typedef struct WebGPURenderer WebGPURenderer;
 // Renderer's command buffer structure
 typedef struct WebGPUCommandBuffer
 {
-    WGPUDevice device;
     CommandBufferCommonHeader common;
     WebGPURenderer *renderer;
 
@@ -1036,11 +1035,9 @@ static WebGPUPipelineResourceLayout *CreateResourceLayoutFromReflection(
 
         layout->bindGroupLayouts[i].layout = wgpuDeviceCreateBindGroupLayout(renderer->device, &bindGroupLayoutDesc);
         layout->bindGroupLayouts[i].entryCount = entryCount;
-        /*layout->bindGroupLayouts[i].types = SDL_malloc(entryCount * sizeof(WebGPUBindingType));*/
         layout->bindGroupLayouts[i].stageFlags = SDL_malloc(entryCount * sizeof(WGPUShaderStageFlags));
 
         for (uint32_t j = 0; j < entryCount; j++) {
-            /*layout->bindGroupLayouts[i].types[j] = entries[j].type;*/
             layout->bindGroupLayouts[i].stageFlags[j] = entries[j].visibility;
         }
 
@@ -1075,7 +1072,7 @@ static void WebGPU_ErrorCallback(WGPUErrorType type, const char *message, void *
         break;
     }
     // Output the error information to the console
-    printf("[%s]: %s\n", errorTypeStr, message);
+    SDL_Log("[%s]: %s\n", errorTypeStr, message);
 }
 
 // Device Request Callback for when the device is requested from the adapter
@@ -1150,8 +1147,6 @@ static SDL_GPUCommandBuffer *WebGPU_AcquireCommandBuffer(SDL_GPURenderer *driver
     height = renderer->claimedWindows[0]->window->h;
     commandBuffer->currentViewport = (WebGPUViewport){ 0, 0, width, height, 0.0, 1.0 };
     commandBuffer->currentScissor = (WebGPURect){ 0, 0, width, height };
-
-    SDL_memcpy(&commandBuffer->device, &renderer->device, sizeof(WGPUDevice *));
 
     WGPUCommandEncoderDescriptor commandEncoderDesc = {
         .label = "SDL_GPU Command Encoder",
@@ -1683,14 +1678,15 @@ static void *WebGPU_MapTransferBuffer(
         return NULL;
     }
 
-    void *mappedData;
     if (mapMode == WGPUMapMode_Read) {
-        mappedData = (void *)wgpuBufferGetConstMappedRange(buffer->buffer, 0, buffer->size);
+        buffer->mappedData = (void *)wgpuBufferGetConstMappedRange(buffer->buffer, 0, buffer->size);
     } else {
-        mappedData = wgpuBufferGetMappedRange(buffer->buffer, 0, buffer->size);
+        buffer->mappedData = wgpuBufferGetMappedRange(buffer->buffer, 0, buffer->size);
     }
 
-    return mappedData;
+    SDL_Log("Mapped buffer %p to %p", buffer->buffer, buffer->mappedData);
+
+    return buffer->mappedData;
 }
 
 static void WebGPU_UnmapTransferBuffer(
@@ -1702,6 +1698,8 @@ static void WebGPU_UnmapTransferBuffer(
     if (buffer && buffer->buffer) {
         wgpuBufferUnmap(buffer->buffer);
         buffer->isMapped = false;
+        buffer->mappedData = NULL;
+        SDL_SetAtomicInt(&buffer->mappingComplete, 0);
     }
 
     (void)driverData;
@@ -1717,6 +1715,8 @@ static void WebGPU_UploadToBuffer(SDL_GPUCommandBuffer *commandBuffer,
         return;
     }
 
+    (void)cycle;
+
     WebGPUCommandBuffer *webgpuCmdBuffer = (WebGPUCommandBuffer *)commandBuffer;
     WebGPUBuffer *srcBuffer = (WebGPUBuffer *)source->transfer_buffer;
     WebGPUBuffer *dstBuffer = (WebGPUBuffer *)destination->buffer;
@@ -1726,26 +1726,19 @@ static void WebGPU_UploadToBuffer(SDL_GPUCommandBuffer *commandBuffer,
         return;
     }
 
-    if (source->offset + destination->size > srcBuffer->size ||
-        destination->offset + destination->size > dstBuffer->size) {
+    if ((uint64_t)source->offset + destination->size > srcBuffer->size ||
+        (uint64_t)destination->offset + destination->size > dstBuffer->size) {
         SDL_LogError(SDL_LOG_CATEGORY_GPU, "Invalid buffer region");
         return;
     }
 
-    (void)cycle;
-
-    WGPUCommandEncoder encoder = webgpuCmdBuffer->commandEncoder;
-
     SDL_Log("Uploading %u bytes from buffer %p to buffer %p", destination->size, srcBuffer->buffer, dstBuffer->buffer);
 
-    WGPUBuffer dstBufferHandle;
-    SDL_memcpy(&dstBufferHandle, &dstBuffer->buffer, sizeof(WGPUBuffer *));
-
     wgpuCommandEncoderCopyBufferToBuffer(
-        encoder,
+        webgpuCmdBuffer->commandEncoder,
         srcBuffer->buffer,
         source->offset,
-        dstBufferHandle,
+        dstBuffer->buffer,
         destination->offset,
         destination->size);
 
@@ -1753,9 +1746,9 @@ static void WebGPU_UploadToBuffer(SDL_GPUCommandBuffer *commandBuffer,
 }
 
 static void WebGPU_DownloadFromBuffer(
-        SDL_GPUCommandBuffer *commandBuffer,
-        const SDL_GPUBufferRegion *source,
-        const SDL_GPUTransferBufferLocation *destination)
+    SDL_GPUCommandBuffer *commandBuffer,
+    const SDL_GPUBufferRegion *source,
+    const SDL_GPUTransferBufferLocation *destination)
 {
     if (!commandBuffer || !source || !destination) {
         SDL_SetError("Invalid parameters for buffer download");
@@ -1998,6 +1991,19 @@ static WGPUVertexBufferLayout *SDL_WGPU_INTERNAL_CreateVertexBufferLayouts(const
         };
     }
 
+    // Print the vertex buffer layouts for debugging purposes
+    for (Uint32 i = 0; i < vertexInputState->num_vertex_buffers; i += 1) {
+        SDL_Log("Vertex Buffer Layout %d:", i);
+        SDL_Log("  Array Stride: %llu", vertexBufferLayouts[i].arrayStride);
+        SDL_Log("  Step Mode: %d", vertexBufferLayouts[i].stepMode);
+        for (Uint32 j = 0; j < vertexBufferLayouts[i].attributeCount; j += 1) {
+            SDL_Log("  Attribute %d:", j);
+            SDL_Log("    Format: %d", vertexBufferLayouts[i].attributes[j].format);
+            SDL_Log("    Offset: %llu", vertexBufferLayouts[i].attributes[j].offset);
+            SDL_Log("    Shader Location: %u", vertexBufferLayouts[i].attributes[j].shaderLocation);
+        }
+    }
+
     // Free the initial attributes array
     SDL_free(attributes);
 
@@ -2077,19 +2083,21 @@ static SDL_GPUGraphicsPipeline *WebGPU_CreateGraphicsPipeline(
         SDL_GPUColorTargetBlendState blendState = colorAttachment->blend_state;
         colorTargets[i] = (WGPUColorTargetState){
             .format = SDLToWGPUTextureFormat(colorAttachment->format),
-            .blend = &(WGPUBlendState){
-                .color = {
-                    .srcFactor = SDLToWGPUBlendFactor(blendState.src_color_blendfactor),
-                    .dstFactor = SDLToWGPUBlendFactor(blendState.dst_color_blendfactor),
-                    .operation = SDLToWGPUBlendOperation(blendState.color_blend_op),
-                },
-                .alpha = {
-                    .srcFactor = SDLToWGPUBlendFactor(blendState.src_alpha_blendfactor),
-                    .dstFactor = SDLToWGPUBlendFactor(blendState.dst_alpha_blendfactor),
-                    .operation = SDLToWGPUBlendOperation(blendState.alpha_blend_op),
-                },
-            },
-            .writeMask = SDLToWGPUColorWriteMask(blendState.color_write_mask),
+            .blend = blendState.enable_blend == false
+                         ? 0
+                         : &(WGPUBlendState){
+                               .color = {
+                                   .srcFactor = SDLToWGPUBlendFactor(blendState.src_color_blendfactor),
+                                   .dstFactor = SDLToWGPUBlendFactor(blendState.dst_color_blendfactor),
+                                   .operation = SDLToWGPUBlendOperation(blendState.color_blend_op),
+                               },
+                               .alpha = {
+                                   .srcFactor = SDLToWGPUBlendFactor(blendState.src_alpha_blendfactor),
+                                   .dstFactor = SDLToWGPUBlendFactor(blendState.dst_alpha_blendfactor),
+                                   .operation = SDLToWGPUBlendOperation(blendState.alpha_blend_op),
+                               },
+                           },
+            .writeMask = blendState.enable_blend == true ? SDLToWGPUColorWriteMask(blendState.color_write_mask) : WGPUColorWriteMask_All
         };
     }
 
@@ -2125,7 +2133,7 @@ static SDL_GPUGraphicsPipeline *WebGPU_CreateGraphicsPipeline(
         .vertex = vertexState,
         .primitive = {
             .topology = SDLToWGPUPrimitiveTopology(pipelineCreateInfo->primitive_type),
-            .stripIndexFormat = WGPUIndexFormat_Undefined,
+            .stripIndexFormat = WGPUIndexFormat_Undefined, // TODO: Support strip index format Uint16 or Uint32
             .frontFace = SDLToWGPUFrontFace(pipelineCreateInfo->rasterizer_state.front_face),
             .cullMode = SDLToWGPUCullMode(pipelineCreateInfo->rasterizer_state.cull_mode),
         },
@@ -2133,7 +2141,7 @@ static SDL_GPUGraphicsPipeline *WebGPU_CreateGraphicsPipeline(
         .depthStencil = pipelineCreateInfo->target_info.has_depth_stencil_target ? &depthStencil : NULL,
         .multisample = {
             .count = pipelineCreateInfo->multisample_state.sample_count == 0 ? 1 : pipelineCreateInfo->multisample_state.sample_count,
-            .mask = pipelineCreateInfo->multisample_state.sample_mask,
+            .mask = pipelineCreateInfo->multisample_state.sample_mask == 0 ? 0xFFFF : pipelineCreateInfo->multisample_state.sample_mask,
             .alphaToCoverageEnabled = false,
         },
         .fragment = &fragmentState,
@@ -2178,7 +2186,7 @@ static void WebGPU_ReleaseGraphicsPipeline(SDL_GPURenderer *driverData,
     SDL_AtomicDecRef(&pipeline->referenceCount);
 
     if (pipeline->pipeline) {
-        if (SDL_GetAtomicInt(&pipeline->referenceCount) == 0){
+        if (SDL_GetAtomicInt(&pipeline->referenceCount) == 0) {
             wgpuRenderPipelineRelease(pipeline->pipeline);
             pipeline->pipeline = NULL;
         }
@@ -2254,17 +2262,24 @@ void WebGPU_SetViewport(SDL_GPUCommandBuffer *renderPass, const SDL_GPUViewport 
 
     WebGPUCommandBuffer *commandBuffer = (WebGPUCommandBuffer *)renderPass;
 
-    commandBuffer->currentViewport = (WebGPUViewport){
+    uint32_t window_width = commandBuffer->renderer->claimedWindows[0]->swapchainData->width;
+    uint32_t window_height = commandBuffer->renderer->claimedWindows[0]->swapchainData->height;
+    WebGPUViewport *wgpuViewport = &commandBuffer->currentViewport;
+
+    float max_viewport_width = (float)window_width - viewport->x;
+    float max_viewport_height = (float)window_height - viewport->y;
+
+    wgpuViewport = &(WebGPUViewport){
         .x = viewport->x,
         .y = viewport->y,
-        .width = viewport->w,
-        .height = viewport->h,
-        .minDepth = viewport->min_depth,
-        .maxDepth = viewport->max_depth,
+        .width = viewport->w > max_viewport_width ? max_viewport_width : viewport->w,
+        .height = viewport->h > max_viewport_height ? max_viewport_height : viewport->h,
+        .minDepth = viewport->min_depth > 0.0f ? viewport->min_depth : 0.0f,
+        .maxDepth = viewport->max_depth > wgpuViewport->minDepth ? viewport->max_depth : wgpuViewport->minDepth,
     };
 
     // Set the viewport
-    wgpuRenderPassEncoderSetViewport(commandBuffer->renderPassEncoder, viewport->x, viewport->y, viewport->w, viewport->h, viewport->min_depth, viewport->max_depth);
+    wgpuRenderPassEncoderSetViewport(commandBuffer->renderPassEncoder, wgpuViewport->x, wgpuViewport->y, wgpuViewport->width, wgpuViewport->height, wgpuViewport->minDepth, wgpuViewport->maxDepth);
 }
 
 void WebGPU_SetScissorRect(SDL_GPUCommandBuffer *renderPass, const SDL_Rect *scissorRect)
