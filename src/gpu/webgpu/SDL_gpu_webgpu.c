@@ -285,10 +285,7 @@ struct WebGPUTexture
     Uint32 layerCount;
     Uint32 levelCount;
     WGPUTextureFormat format;
-    SDL_GPUTextureUsageFlags usageFlags;
-
-    Uint32 subresourceCount;
-    WebGPUTextureSubresource *subresources;
+    SDL_GPUTextureUsageFlags usage;
 
     WebGPUTextureHandle *handle;
 
@@ -405,7 +402,7 @@ static WGPUBufferUsageFlags SDLToWGPUBufferUsageFlags(SDL_GPUBufferUsageFlags us
 {
     WGPUBufferUsageFlags wgpuFlags = WGPUBufferUsage_None;
     if (usageFlags & SDL_GPU_BUFFERUSAGE_VERTEX)
-        wgpuFlags |= WGPUBufferUsage_Vertex | WGPUBufferUsage_CopyDst | WGPUBufferUsage_CopySrc;
+        wgpuFlags |= WGPUBufferUsage_Vertex | WGPUBufferUsage_CopyDst;
     if (usageFlags & SDL_GPU_BUFFERUSAGE_INDEX)
         wgpuFlags |= WGPUBufferUsage_Index;
     if (usageFlags & SDL_GPU_BUFFERUSAGE_INDIRECT)
@@ -590,6 +587,73 @@ static WGPUTextureFormat SDLToWGPUTextureFormat(SDL_GPUTextureFormat sdlFormat)
     }
 }
 
+static WGPUTextureUsageFlags SDLToWGPUTextureUsageFlags(SDL_GPUTextureUsageFlags usageFlags)
+{
+    WGPUTextureUsageFlags wgpuFlags;
+    switch (usageFlags) {
+    case SDL_GPU_TEXTUREUSAGE_SAMPLER:
+        wgpuFlags = WGPUTextureUsage_TextureBinding;
+        break;
+    case SDL_GPU_TEXTUREUSAGE_COLOR_TARGET:
+    case SDL_GPU_TEXTUREUSAGE_DEPTH_STENCIL_TARGET:
+        wgpuFlags = WGPUTextureUsage_RenderAttachment;
+        break;
+    case SDL_GPU_TEXTUREUSAGE_GRAPHICS_STORAGE_READ:
+        wgpuFlags = WGPUTextureUsage_StorageBinding;
+        break;
+    case SDL_GPU_TEXTUREUSAGE_COMPUTE_STORAGE_READ:
+        wgpuFlags = WGPUTextureUsage_StorageBinding | WGPUTextureUsage_CopySrc;
+        break;
+    case SDL_GPU_TEXTUREUSAGE_COMPUTE_STORAGE_WRITE:
+        wgpuFlags = WGPUTextureUsage_StorageBinding | WGPUTextureUsage_CopyDst;
+        break;
+    case SDL_GPU_TEXTUREUSAGE_COMPUTE_STORAGE_SIMULTANEOUS_READ_WRITE:
+        wgpuFlags = WGPUTextureUsage_StorageBinding | WGPUTextureUsage_CopySrc | WGPUTextureUsage_CopyDst;
+        break;
+    default:
+        wgpuFlags = WGPUTextureUsage_None;
+        break;
+    }
+
+    return wgpuFlags;
+}
+
+static WGPUTextureDimension SDLToWGPUTextureDimension(SDL_GPUTextureType type)
+{
+    switch (type) {
+    case SDL_GPU_TEXTURETYPE_2D:
+    case SDL_GPU_TEXTURETYPE_2D_ARRAY:
+    // Cubemaps in WebGPU are treated as 2D textures so we set the dimension to 2D
+    case SDL_GPU_TEXTURETYPE_CUBE:
+    case SDL_GPU_TEXTURETYPE_CUBE_ARRAY:
+        return WGPUTextureDimension_2D;
+    case SDL_GPU_TEXTURETYPE_3D:
+        return WGPUTextureDimension_3D;
+    default:
+        SDL_Log("SDL_GPU: Invalid texture type %d. Using 2D.", type);
+        return WGPUTextureDimension_2D;
+    }
+}
+
+static WGPUTextureViewDimension SDLToWGPUTextureViewDimension(SDL_GPUTextureType type)
+{
+    switch (type) {
+    case SDL_GPU_TEXTURETYPE_2D:
+        return WGPUTextureViewDimension_2D;
+    case SDL_GPU_TEXTURETYPE_2D_ARRAY:
+        return WGPUTextureViewDimension_2DArray;
+    case SDL_GPU_TEXTURETYPE_CUBE:
+        return WGPUTextureViewDimension_Cube;
+    case SDL_GPU_TEXTURETYPE_CUBE_ARRAY:
+        return WGPUTextureViewDimension_CubeArray;
+    case SDL_GPU_TEXTURETYPE_3D:
+        return WGPUTextureViewDimension_3D;
+    default:
+        SDL_Log("SDL_GPU: Invalid texture type %d. Using 2D.", type);
+        return WGPUTextureViewDimension_2D;
+    }
+}
+
 static SDL_GPUTextureFormat WGPUToSDLTextureFormat(WGPUTextureFormat wgpuFormat)
 {
     switch (wgpuFormat) {
@@ -690,6 +754,21 @@ static SDL_GPUTextureFormat WGPUToSDLTextureFormat(WGPUTextureFormat wgpuFormat)
     }
 }
 
+static uint32_t SDLToWGPUSampleCount(SDL_GPUSampleCount samples)
+{
+    switch (samples) {
+    // WGPU only supports 1, and 4x MSAA
+    case SDL_GPU_SAMPLECOUNT_1:
+        return 1;
+    case SDL_GPU_SAMPLECOUNT_2:
+    case SDL_GPU_SAMPLECOUNT_4:
+    case SDL_GPU_SAMPLECOUNT_8:
+        return 4;
+    default:
+        return 1;
+    }
+}
+
 static WGPUBlendFactor SDLToWGPUBlendFactor(SDL_GPUBlendFactor sdlFactor)
 {
     switch (sdlFactor) {
@@ -739,6 +818,30 @@ static WGPUBlendOperation SDLToWGPUBlendOperation(SDL_GPUBlendOp sdlOp)
         return WGPUBlendOperation_Max;
     default:
         return WGPUBlendOperation_Undefined;
+    }
+}
+
+static WGPUStencilOperation SDLToWGPUStencilOperation(SDL_GPUStencilOp op)
+{
+    switch (op) {
+    case SDL_GPU_STENCILOP_KEEP:
+        return WGPUStencilOperation_Keep;
+    case SDL_GPU_STENCILOP_ZERO:
+        return WGPUStencilOperation_Zero;
+    case SDL_GPU_STENCILOP_REPLACE:
+        return WGPUStencilOperation_Replace;
+    case SDL_GPU_STENCILOP_INVERT:
+        return WGPUStencilOperation_Invert;
+    case SDL_GPU_STENCILOP_INCREMENT_AND_CLAMP:
+        return WGPUStencilOperation_IncrementClamp;
+    case SDL_GPU_STENCILOP_DECREMENT_AND_CLAMP:
+        return WGPUStencilOperation_DecrementClamp;
+    case SDL_GPU_STENCILOP_INCREMENT_AND_WRAP:
+        return WGPUStencilOperation_IncrementWrap;
+    case SDL_GPU_STENCILOP_DECREMENT_AND_WRAP:
+        return WGPUStencilOperation_DecrementWrap;
+    default:
+        return WGPUStencilOperation_Keep;
     }
 }
 
@@ -1227,9 +1330,10 @@ static void WebGPU_BeginRenderPass(SDL_GPUCommandBuffer *commandBuffer,
     // Set depth stencil attachment if provided
     if (depthStencilAttachmentInfo != NULL) {
         // Get depth texture as WebGPUTexture
-        texture = (WebGPUTexture *)depthStencilAttachmentInfo->texture;
+        WebGPUTextureContainer *textureContainer = (WebGPUTextureContainer *)depthStencilAttachmentInfo->texture;
+        texture = textureContainer->activeTextureHandle->webgpuTexture;
         WGPURenderPassDepthStencilAttachment depthStencilAttachment = {
-            .view = texture->fullView,
+            .view = NULL,
             .depthLoadOp = SDLToWGPULoadOp(depthStencilAttachmentInfo->load_op),
             .depthStoreOp = SDLToWGPUStoreOp(depthStencilAttachmentInfo->store_op),
             .depthClearValue = depthStencilAttachmentInfo->clear_depth,
@@ -1447,7 +1551,7 @@ static bool WebGPU_AcquireSwapchainTexture(
     texture->type = SDL_GPU_TEXTURETYPE_2D;
     texture->isMSAAColorTarget = swapchainData->sampleCount > 1;
     texture->format = swapchainData->format;
-    texture->usageFlags = SDL_GPU_TEXTUREUSAGE_COLOR_TARGET;
+    texture->usage = SDL_GPU_TEXTUREUSAGE_COLOR_TARGET;
 
     // For MSAA, we'll return the MSAA texture instead of the swapchain texture
     if (swapchainData->sampleCount > 1) {
@@ -1458,6 +1562,36 @@ static bool WebGPU_AcquireSwapchainTexture(
     *ret_texture = (SDL_GPUTexture *)texture;
 
     // It is important to release these textures when they are no longer needed
+    return true;
+}
+
+static bool WebGPU_SupportsTextureFormat(SDL_GPURenderer *driverData,
+                                         SDL_GPUTextureFormat format,
+                                         SDL_GPUTextureType type,
+                                         SDL_GPUTextureUsageFlags usage)
+{
+    WebGPURenderer *renderer = (WebGPURenderer *)driverData;
+    WGPUTextureFormat wgpuFormat = SDLToWGPUTextureFormat(format);
+    WGPUTextureUsageFlags wgpuUsage = SDLToWGPUTextureUsageFlags(usage);
+    WGPUTextureDimension dimension = WGPUTextureDimension_Undefined;
+    if (type == SDL_GPU_TEXTURETYPE_2D || type == SDL_GPU_TEXTURETYPE_2D_ARRAY) {
+        dimension = WGPUTextureDimension_2D;
+    } else if (type == SDL_GPU_TEXTURETYPE_3D || type == SDL_GPU_TEXTURETYPE_CUBE_ARRAY) {
+        dimension = WGPUTextureDimension_3D;
+    }
+
+    // Verify that the format, usage, and dimension are considered valid
+    if (wgpuFormat == WGPUTextureFormat_Undefined) {
+        return false;
+    }
+    if (wgpuUsage == WGPUTextureUsage_None) {
+        return false;
+    }
+    if (dimension == WGPUTextureDimension_Undefined) {
+        return false;
+    }
+
+    // Texture format is valid.
     return true;
 }
 
@@ -2119,10 +2253,25 @@ static SDL_GPUGraphicsPipeline *WebGPU_CreateGraphicsPipeline(
         depthStencil.depthWriteEnabled = state->enable_depth_write;
         depthStencil.depthCompare = SDLToWGPUCompareFunction(state->compare_op);
 
-        // No read mask is provided with SDL_GPU and this isn't too big of an issue
-        // since we can just set it to 0xFF and move on with our lives
-        depthStencil.stencilReadMask = 0xFF;
+        depthStencil.stencilReadMask = state->compare_mask != 0 ? state->compare_mask : 0xFF;
         depthStencil.stencilWriteMask = state->write_mask;
+
+        // If the stencil test is enabled, we need to set up the stencil state for the front and back faces
+        if (state->enable_stencil_test) {
+            depthStencil.stencilFront = (WGPUStencilFaceState){
+                .compare = SDLToWGPUCompareFunction(state->front_stencil_state.compare_op),
+                .failOp = SDLToWGPUStencilOperation(state->front_stencil_state.fail_op),
+                .depthFailOp = SDLToWGPUStencilOperation(state->front_stencil_state.depth_fail_op),
+                .passOp = SDLToWGPUStencilOperation(state->front_stencil_state.pass_op),
+            };
+
+            depthStencil.stencilBack = (WGPUStencilFaceState){
+                .compare = SDLToWGPUCompareFunction(state->back_stencil_state.compare_op),
+                .failOp = SDLToWGPUStencilOperation(state->back_stencil_state.fail_op),
+                .depthFailOp = SDLToWGPUStencilOperation(state->back_stencil_state.depth_fail_op),
+                .passOp = SDLToWGPUStencilOperation(state->back_stencil_state.pass_op),
+            };
+        }
     }
 
     // Create the render pipeline descriptor
@@ -2254,6 +2403,113 @@ static void WebGPU_INTERNAL_CreateOrUpdateBindGroup(
     SDL_free(entries);
 }
 
+// Texture Functions
+// ---------------------------------------------------
+
+static SDL_GPUTexture *WebGPU_CreateTexture(
+    SDL_GPURenderer *driverData,
+    const SDL_GPUTextureCreateInfo *textureCreateInfo)
+{
+    SDL_assert(driverData && "Driver data must not be NULL when creating a texture");
+    SDL_assert(textureCreateInfo && "Texture create info must not be NULL when creating a texture");
+
+    WebGPURenderer *renderer = (WebGPURenderer *)driverData;
+    WebGPUTexture *texture = (WebGPUTexture *)SDL_calloc(1, sizeof(WebGPUTexture));
+    if (!texture) {
+        SDL_OutOfMemory();
+        return NULL;
+    }
+
+    WGPUTextureDescriptor textureDesc = {
+        .label = "SDL_GPU WebGPU Texture",
+        .size = (WGPUExtent3D){
+            .width = textureCreateInfo->width,
+            .height = textureCreateInfo->height,
+            .depthOrArrayLayers = textureCreateInfo->layer_count_or_depth,
+        },
+        .mipLevelCount = 1,
+        .sampleCount = SDLToWGPUSampleCount(textureCreateInfo->sample_count),
+        .dimension = SDLToWGPUTextureDimension(textureCreateInfo->type),
+        .format = SDLToWGPUTextureFormat(textureCreateInfo->format),
+        .usage = SDLToWGPUTextureUsageFlags(textureCreateInfo->usage),
+    };
+
+    WGPUTexture wgpuTexture = wgpuDeviceCreateTexture(renderer->device, &textureDesc);
+    if (wgpuTexture == NULL) {
+        SDL_LogError(SDL_LOG_CATEGORY_GPU, "Failed to create texture");
+        SDL_free(texture);
+        SDL_OutOfMemory();
+        return NULL;
+    }
+
+    // Create the WebGPUTexture object
+    texture->texture = wgpuTexture;
+    texture->usage = textureDesc.usage;
+    texture->format = textureDesc.format;
+    texture->dimensions = textureDesc.size;
+    texture->layerCount = textureCreateInfo->layer_count_or_depth;
+    texture->type = textureCreateInfo->type;
+
+    // Create Texture View for the texture
+    WGPUTextureViewDescriptor viewDesc = {
+        .label = "SDL_GPU WebGPU Texture View",
+        .format = textureDesc.format,
+        .dimension = SDLToWGPUTextureViewDimension(textureCreateInfo->type),
+        .baseMipLevel = 0,
+        .mipLevelCount = 1,
+        .baseArrayLayer = 0,
+        .arrayLayerCount = textureCreateInfo->layer_count_or_depth,
+    };
+
+    // Create the texture view
+    texture->fullView = wgpuTextureCreateView(texture->texture, &viewDesc);
+    if (texture->fullView == NULL) {
+        SDL_LogError(SDL_LOG_CATEGORY_GPU, "Failed to create texture view");
+        SDL_free(texture);
+        SDL_OutOfMemory();
+        return NULL;
+    }
+
+    // Create a handle pointer for our texture and its container.
+    WebGPUTextureHandle *textureHandle = SDL_malloc(sizeof(WebGPUTextureHandle));
+    if (textureHandle == NULL) {
+        SDL_LogError(SDL_LOG_CATEGORY_GPU, "Failed to create texture handle");
+        SDL_free(texture);
+        SDL_OutOfMemory();
+        return NULL;
+    }
+    textureHandle->webgpuTexture = texture;
+    textureHandle->container = NULL;
+
+    // Assign the texture handle to the texture object
+    texture->handle = textureHandle;
+
+    // Create a texture container for the texture handle
+    WebGPUTextureContainer *container = SDL_malloc(sizeof(WebGPUTextureContainer));
+    if (container == NULL) {
+        SDL_LogError(SDL_LOG_CATEGORY_GPU, "Failed to create texture container");
+        SDL_free(texture);
+        SDL_free(textureHandle);
+        SDL_OutOfMemory();
+        return NULL;
+    }
+
+    // Assign the container to the texture handle
+    textureHandle->container = container;
+
+    // Configure the texture container
+    container->header.info = *textureCreateInfo;
+    container->activeTextureHandle = textureHandle;
+    container->textureCapacity = 1;
+    container->textureCount = 1;
+    container->textureHandles = SDL_malloc(sizeof(WebGPUTextureHandle *) * container->textureCapacity);
+    container->textureHandles[0] = textureHandle;
+    container->debugName = NULL;
+
+    SDL_Log("Created texture handle %p, with texture container %p, and texture %p", textureHandle, container, texture);
+    return (SDL_GPUTexture *)container;
+}
+
 void WebGPU_SetViewport(SDL_GPUCommandBuffer *renderPass, const SDL_GPUViewport *viewport)
 {
     if (renderPass == NULL) {
@@ -2309,9 +2565,15 @@ void WebGPU_SetScissorRect(SDL_GPUCommandBuffer *renderPass, const SDL_Rect *sci
     wgpuRenderPassEncoderSetScissorRect(commandBuffer->renderPassEncoder, scissorRect->x, scissorRect->y, clamped_width, clamped_height);
 }
 
-static void WebGPU_BindGraphicsPipeline(
-    SDL_GPUCommandBuffer *commandBuffer,
-    SDL_GPUGraphicsPipeline *graphicsPipeline)
+static void WebGPU_SetStencilReference(SDL_GPUCommandBuffer *commandBuffer,
+                                       Uint8 reference)
+{
+    // no-op (pass)
+}
+
+    static void WebGPU_BindGraphicsPipeline(
+        SDL_GPUCommandBuffer *commandBuffer,
+        SDL_GPUGraphicsPipeline *graphicsPipeline)
 {
     WebGPUCommandBuffer *webgpuCommandBuffer = (WebGPUCommandBuffer *)commandBuffer;
     WebGPUGraphicsPipeline *pipeline = (WebGPUGraphicsPipeline *)graphicsPipeline;
@@ -2442,6 +2704,7 @@ static SDL_GPUDevice *WebGPU_CreateDevice(bool debug, bool preferLowPower, SDL_P
     result->AcquireCommandBuffer = WebGPU_AcquireCommandBuffer;
     result->AcquireSwapchainTexture = WebGPU_AcquireSwapchainTexture;
     result->GetSwapchainTextureFormat = WebGPU_GetSwapchainTextureFormat;
+    result->SupportsTextureFormat = WebGPU_SupportsTextureFormat;
 
     result->CreateBuffer = WebGPU_CreateGPUBuffer;
     result->ReleaseBuffer = WebGPU_ReleaseBuffer;
@@ -2451,6 +2714,8 @@ static SDL_GPUDevice *WebGPU_CreateDevice(bool debug, bool preferLowPower, SDL_P
     result->UnmapTransferBuffer = WebGPU_UnmapTransferBuffer;
     result->UploadToBuffer = WebGPU_UploadToBuffer;
     result->DownloadFromBuffer = WebGPU_DownloadFromBuffer;
+
+    result->CreateTexture = WebGPU_CreateTexture;
 
     result->BindVertexBuffers = WebGPU_BindVertexBuffers;
 
@@ -2468,6 +2733,7 @@ static SDL_GPUDevice *WebGPU_CreateDevice(bool debug, bool preferLowPower, SDL_P
 
     result->SetScissor = WebGPU_SetScissorRect;
     result->SetViewport = WebGPU_SetViewport;
+    result->SetStencilReference = WebGPU_SetStencilReference;
 
     result->Submit = WebGPU_Submit;
     result->BeginRenderPass = WebGPU_BeginRenderPass;
