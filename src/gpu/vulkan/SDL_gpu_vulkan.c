@@ -6577,6 +6577,7 @@ static bool VULKAN_SupportsSampleCount(
     VulkanRenderer *renderer = (VulkanRenderer *)driverData;
     VkSampleCountFlags bits = IsDepthFormat(format) ? renderer->physicalDeviceProperties.properties.limits.framebufferDepthSampleCounts : renderer->physicalDeviceProperties.properties.limits.framebufferColorSampleCounts;
     VkSampleCountFlagBits vkSampleCount = SDLToVK_SampleCount[sampleCount];
+    container->textureHandles
     return !!(bits & vkSampleCount);
 }
 

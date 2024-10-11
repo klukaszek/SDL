@@ -481,6 +481,19 @@ static WGPUCullMode SDLToWGPUCullMode(SDL_GPUCullMode cullMode)
     }
 }
 
+static WGPUIndexFormat SDLToWGPUIndexFormat(SDL_GPUIndexElementSize indexType)
+{
+    switch (indexType) {
+    case SDL_GPU_INDEXELEMENTSIZE_16BIT:
+        return WGPUIndexFormat_Uint16;
+    case SDL_GPU_INDEXELEMENTSIZE_32BIT:
+        return WGPUIndexFormat_Uint32;
+    default:
+        SDL_Log("SDL_GPU: Invalid index type %d. Using Uint16.", indexType);
+        return WGPUIndexFormat_Uint16;
+    }
+}
+
 static WGPUTextureFormat SDLToWGPUTextureFormat(SDL_GPUTextureFormat sdlFormat)
 {
     switch (sdlFormat) {
@@ -1320,20 +1333,14 @@ static void WebGPU_BeginRenderPass(SDL_GPUCommandBuffer *commandBuffer,
         }
     }
 
-    // Set color attachments for the render pass
-    WGPURenderPassDescriptor renderPassDesc = {
-        .label = "SDL_GPU Render Pass",
-        .colorAttachmentCount = colorAttachmentCount,
-        .colorAttachments = colorAttachments,
-    };
-
+    WGPURenderPassDepthStencilAttachment depthStencilAttachment;
     // Set depth stencil attachment if provided
     if (depthStencilAttachmentInfo != NULL) {
         // Get depth texture as WebGPUTexture
         WebGPUTextureContainer *textureContainer = (WebGPUTextureContainer *)depthStencilAttachmentInfo->texture;
         texture = textureContainer->activeTextureHandle->webgpuTexture;
-        WGPURenderPassDepthStencilAttachment depthStencilAttachment = {
-            .view = NULL,
+        depthStencilAttachment = (WGPURenderPassDepthStencilAttachment){
+            .view = texture->fullView,
             .depthLoadOp = SDLToWGPULoadOp(depthStencilAttachmentInfo->load_op),
             .depthStoreOp = SDLToWGPUStoreOp(depthStencilAttachmentInfo->store_op),
             .depthClearValue = depthStencilAttachmentInfo->clear_depth,
@@ -1341,9 +1348,15 @@ static void WebGPU_BeginRenderPass(SDL_GPUCommandBuffer *commandBuffer,
             .stencilStoreOp = SDLToWGPUStoreOp(depthStencilAttachmentInfo->stencil_store_op),
             .stencilClearValue = depthStencilAttachmentInfo->clear_stencil,
         };
-
-        renderPassDesc.depthStencilAttachment = &depthStencilAttachment;
     }
+
+    // Set color attachments for the render pass
+    WGPURenderPassDescriptor renderPassDesc = {
+        .label = "SDL_GPU Render Pass",
+        .colorAttachmentCount = colorAttachmentCount,
+        .colorAttachments = colorAttachments,
+        .depthStencilAttachment = depthStencilAttachmentInfo != NULL ? &depthStencilAttachment : NULL,
+    };
 
     // Begin the render pass
     webgpuCommandBuffer->renderPassEncoder = wgpuCommandEncoderBeginRenderPass(webgpuCommandBuffer->commandEncoder, &renderPassDesc);
@@ -1398,6 +1411,7 @@ static void WebGPU_CreateSwapchain(WebGPURenderer *renderer, WindowData *windowD
     };
     WGPUSurfaceDescriptor surf_desc = {
         .nextInChain = &canvas_desc.chain,
+        .label = "SDL_GPU Swapchain Surface",
     };
     windowData->swapchainData->surface = wgpuInstanceCreateSurface(renderer->instance, &surf_desc);
 
@@ -1429,12 +1443,20 @@ static void WebGPU_CreateSwapchain(WebGPURenderer *renderer, WindowData *windowD
             .height = swapchainData->height,
             .depthOrArrayLayers = 1,
         },
-        .format = WGPUTextureFormat_Depth32FloatStencil8,
+        .format = WGPUTextureFormat_Depth24PlusStencil8,
         .mipLevelCount = 1,
         .sampleCount = swapchainData->sampleCount != 0 ? swapchainData->sampleCount : 1,
+        .label = "CanvasDepth/Stencil",
     };
     swapchainData->depthStencilTexture = wgpuDeviceCreateTexture(renderer->device, &depthDesc);
-    swapchainData->depthStencilView = wgpuTextureCreateView(swapchainData->depthStencilTexture, NULL);
+    swapchainData->depthStencilView = wgpuTextureCreateView(swapchainData->depthStencilTexture,
+                                                            &(WGPUTextureViewDescriptor){
+                                                                .label = "CanvasDepth/StencilView",
+                                                                .format = WGPUTextureFormat_Depth24PlusStencil8,
+                                                                .dimension = WGPUTextureViewDimension_2D,
+                                                                .mipLevelCount = 1,
+                                                                .arrayLayerCount = 1,
+                                                            });
 
     // MSAA texture for swapchain
     if (swapchainData->sampleCount > 1) {
@@ -1958,6 +1980,42 @@ static void WebGPU_BindVertexBuffers(
     }
 }
 
+static void WebGPU_BindIndexBuffer(SDL_GPUCommandBuffer *commandBuffer,
+                                   const SDL_GPUBufferBinding *binding,
+                                   SDL_GPUIndexElementSize indexElementSize)
+{
+    if (!commandBuffer || !binding) {
+        SDL_SetError("Invalid parameters for binding index buffer");
+        return;
+    }
+
+    WebGPUCommandBuffer *webgpuCmdBuffer = (WebGPUCommandBuffer *)commandBuffer;
+
+    // Ensure we're inside a render pass
+    if (!webgpuCmdBuffer->renderPassEncoder) {
+        SDL_SetError("Cannot bind index buffer outside of a render pass");
+        return;
+    }
+
+    WebGPUBuffer *buffer = (WebGPUBuffer *)binding->buffer;
+
+    if (!buffer || !buffer->buffer) {
+        SDL_SetError("Invalid buffer");
+        return;
+    }
+
+    WGPUIndexFormat indexFormat = SDLToWGPUIndexFormat(indexElementSize);
+
+    /*SDL_Log("Binding index buffer %p with format %d", buffer->buffer, indexFormat);*/
+
+    wgpuRenderPassEncoderSetIndexBuffer(
+        webgpuCmdBuffer->renderPassEncoder,
+        buffer->buffer,
+        indexFormat,
+        binding->offset,
+        buffer->size == 0 ? WGPU_WHOLE_SIZE : buffer->size);
+}
+
 // Shader Functions
 // ---------------------------------------------------
 static SDL_GPUShader *WebGPU_CreateShader(
@@ -2425,7 +2483,7 @@ static SDL_GPUTexture *WebGPU_CreateTexture(
         .size = (WGPUExtent3D){
             .width = textureCreateInfo->width,
             .height = textureCreateInfo->height,
-            .depthOrArrayLayers = textureCreateInfo->layer_count_or_depth,
+            .depthOrArrayLayers = textureCreateInfo->layer_count_or_depth == 0 ? 1 : textureCreateInfo->layer_count_or_depth,
         },
         .mipLevelCount = 1,
         .sampleCount = SDLToWGPUSampleCount(textureCreateInfo->sample_count),
@@ -2458,11 +2516,12 @@ static SDL_GPUTexture *WebGPU_CreateTexture(
         .baseMipLevel = 0,
         .mipLevelCount = 1,
         .baseArrayLayer = 0,
-        .arrayLayerCount = textureCreateInfo->layer_count_or_depth,
+        .arrayLayerCount = textureCreateInfo->layer_count_or_depth == 0 ? 1 : textureCreateInfo->layer_count_or_depth,
     };
 
     // Create the texture view
     texture->fullView = wgpuTextureCreateView(texture->texture, &viewDesc);
+    SDL_Log("Created texture view %p", texture->fullView);
     if (texture->fullView == NULL) {
         SDL_LogError(SDL_LOG_CATEGORY_GPU, "Failed to create texture view");
         SDL_free(texture);
@@ -2508,6 +2567,33 @@ static SDL_GPUTexture *WebGPU_CreateTexture(
 
     SDL_Log("Created texture handle %p, with texture container %p, and texture %p", textureHandle, container, texture);
     return (SDL_GPUTexture *)container;
+}
+
+static void WebGPU_ReleaseTexture(
+    SDL_GPURenderer *driverData,
+    SDL_GPUTexture *texture)
+{
+    SDL_assert(driverData && "Driver data must not be NULL when destroying a texture");
+    SDL_assert(texture && "Texture must not be NULL when destroying a texture");
+
+    WebGPUTextureContainer *container = (WebGPUTextureContainer *)texture;
+    WebGPUTextureHandle *textureHandle = container->activeTextureHandle;
+    WebGPUTexture *webgpuTexture = textureHandle->webgpuTexture;
+
+    // Release the texture view
+    wgpuTextureViewRelease(webgpuTexture->fullView);
+
+    // Release the texture
+    wgpuTextureRelease(webgpuTexture->texture);
+
+    // Free the texture handle
+    SDL_free(textureHandle);
+
+    // Free the texture container
+    SDL_free(container);
+
+    // Free the texture
+    SDL_free(webgpuTexture);
 }
 
 void WebGPU_SetViewport(SDL_GPUCommandBuffer *renderPass, const SDL_GPUViewport *viewport)
@@ -2571,9 +2657,9 @@ static void WebGPU_SetStencilReference(SDL_GPUCommandBuffer *commandBuffer,
     // no-op (pass)
 }
 
-    static void WebGPU_BindGraphicsPipeline(
-        SDL_GPUCommandBuffer *commandBuffer,
-        SDL_GPUGraphicsPipeline *graphicsPipeline)
+static void WebGPU_BindGraphicsPipeline(
+    SDL_GPUCommandBuffer *commandBuffer,
+    SDL_GPUGraphicsPipeline *graphicsPipeline)
 {
     WebGPUCommandBuffer *webgpuCommandBuffer = (WebGPUCommandBuffer *)commandBuffer;
     WebGPUGraphicsPipeline *pipeline = (WebGPUGraphicsPipeline *)graphicsPipeline;
@@ -2614,6 +2700,18 @@ static void WebGPU_DrawPrimitives(
 {
     WebGPUCommandBuffer *wgpuCommandBuffer = (WebGPUCommandBuffer *)commandBuffer;
     wgpuRenderPassEncoderDraw(wgpuCommandBuffer->renderPassEncoder, vertexCount, instanceCount, firstVertex, firstInstance);
+}
+
+static void WebGPU_DrawIndexedPrimitives(
+    SDL_GPUCommandBuffer *commandBuffer,
+    Uint32 numIndices,
+    Uint32 numInstances,
+    Uint32 firstIndex,
+    Sint32 vertexOffset,
+    Uint32 firstInstance)
+{
+    WebGPUCommandBuffer *wgpuCommandBuffer = (WebGPUCommandBuffer *)commandBuffer;
+    wgpuRenderPassEncoderDrawIndexed(wgpuCommandBuffer->renderPassEncoder, numIndices, numInstances, firstIndex, vertexOffset, firstInstance);
 }
 
 static bool WebGPU_PrepareDriver(SDL_VideoDevice *_this)
@@ -2716,8 +2814,10 @@ static SDL_GPUDevice *WebGPU_CreateDevice(bool debug, bool preferLowPower, SDL_P
     result->DownloadFromBuffer = WebGPU_DownloadFromBuffer;
 
     result->CreateTexture = WebGPU_CreateTexture;
+    result->ReleaseTexture = WebGPU_ReleaseTexture;
 
     result->BindVertexBuffers = WebGPU_BindVertexBuffers;
+    result->BindIndexBuffer = WebGPU_BindIndexBuffer;
 
     result->CreateShader = WebGPU_CreateShader;
     result->ReleaseShader = WebGPU_ReleaseShader;
@@ -2728,6 +2828,7 @@ static SDL_GPUDevice *WebGPU_CreateDevice(bool debug, bool preferLowPower, SDL_P
     result->BindGraphicsPipeline = WebGPU_BindGraphicsPipeline;
     result->ReleaseGraphicsPipeline = WebGPU_ReleaseGraphicsPipeline;
     result->DrawPrimitives = WebGPU_DrawPrimitives;
+    result->DrawIndexedPrimitives = WebGPU_DrawIndexedPrimitives;
 
     // TODO END
 
