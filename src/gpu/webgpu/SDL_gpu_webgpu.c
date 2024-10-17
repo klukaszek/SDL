@@ -181,7 +181,6 @@ typedef struct WebGPUBuffer
     bool isMapped;
     void *mappedData;
     SDL_AtomicInt mappingComplete;
-    char debugName[128];
 } WebGPUBuffer;
 
 typedef struct WebGPUBufferContainer
@@ -1778,7 +1777,19 @@ static SDL_GPUBuffer *WebGPU_INTERNAL_CreateGPUBuffer(SDL_GPURenderer *driverDat
     buffer->markedForDestroy = false;
     buffer->isMapped = false;
 
-    return (SDL_GPUBuffer *)buffer;
+    WebGPUBufferHandle *handle = SDL_malloc(sizeof(WebGPUBufferHandle));
+    handle->webgpuBuffer = buffer;
+    buffer->handle = handle;
+
+    WebGPUBufferContainer *container = SDL_malloc(sizeof(WebGPUBufferContainer));
+    container->activeBufferHandle = handle;
+    container->bufferCapacity = 1;
+    container->bufferHandles = SDL_malloc(sizeof(WebGPUBufferHandle *) * container->bufferCapacity);
+    container->bufferHandles[0] = handle;
+    container->bufferCount = 1;
+    container->debugName = NULL;
+
+    return (SDL_GPUBuffer *)container;
 }
 
 static SDL_GPUBuffer *WebGPU_CreateGPUBuffer(SDL_GPURenderer *driverData,
@@ -1790,11 +1801,23 @@ static SDL_GPUBuffer *WebGPU_CreateGPUBuffer(SDL_GPURenderer *driverData,
 
 static void WebGPU_ReleaseBuffer(SDL_GPURenderer *driverData, SDL_GPUBuffer *buffer)
 {
-    WebGPUBuffer *webgpuBuffer = (WebGPUBuffer *)buffer;
-    if (webgpuBuffer->buffer) {
-        wgpuBufferRelease(webgpuBuffer->buffer);
+    WebGPUBufferContainer *container = (WebGPUBufferContainer *)buffer;
+    for (Uint32 i = 0; i < container->bufferCount; i += 1) {
+        WebGPUBufferHandle *handle = container->bufferHandles[i];
+        WebGPUBuffer *webgpuBuffer = handle->webgpuBuffer;
+        if (webgpuBuffer->buffer) {
+            wgpuBufferRelease(webgpuBuffer->buffer);
+        }
+        SDL_free(handle);
     }
-    SDL_free(webgpuBuffer);
+
+    if (container->debugName) {
+        SDL_free(container->debugName);
+    }
+
+    SDL_free(container->bufferHandles);
+
+    SDL_free(container);
 }
 
 static void WebGPU_SetBufferName(SDL_GPURenderer *driverData,
@@ -1810,9 +1833,14 @@ static void WebGPU_SetBufferName(SDL_GPURenderer *driverData,
         return;
     }
 
-    WebGPUBuffer *webgpuBuffer = (WebGPUBuffer *)buffer;
-    memcpy(webgpuBuffer->debugName, text, strlen(text));
-    wgpuBufferSetLabel(webgpuBuffer->buffer, text);
+    WebGPUBufferContainer *container = (WebGPUBufferContainer *)buffer;
+    if (container->debugName) {
+        SDL_free(container->debugName);
+    }
+
+    container->debugName = SDL_strdup(text);
+
+    wgpuBufferSetLabel(container->activeBufferHandle->webgpuBuffer->buffer, text);
 }
 
 static SDL_GPUTransferBuffer *WebGPU_CreateTransferBuffer(
@@ -1825,7 +1853,8 @@ static SDL_GPUTransferBuffer *WebGPU_CreateTransferBuffer(
 
 static void WebGPU_ReleaseTransferBuffer(SDL_GPURenderer *driverData, SDL_GPUTransferBuffer *transferBuffer)
 {
-    WebGPUBuffer *webgpuBuffer = (WebGPUBuffer *)transferBuffer;
+    WebGPUBufferContainer *container = (WebGPUBufferContainer *)transferBuffer;
+    WebGPUBuffer *webgpuBuffer = container->activeBufferHandle->webgpuBuffer;
     if (webgpuBuffer->buffer) {
         wgpuBufferRelease(webgpuBuffer->buffer);
     }
@@ -1853,7 +1882,9 @@ static void *WebGPU_MapTransferBuffer(
     SDL_GPUTransferBuffer *transferBuffer,
     bool cycle)
 {
-    WebGPUBuffer *buffer = (WebGPUBuffer *)transferBuffer;
+
+    WebGPUBufferContainer *container = (WebGPUBufferContainer *)transferBuffer;
+    WebGPUBuffer *buffer = (WebGPUBuffer *)container->activeBufferHandle->webgpuBuffer;
 
     (void)cycle;
 
@@ -1912,7 +1943,8 @@ static void WebGPU_UnmapTransferBuffer(
     SDL_GPURenderer *driverData,
     SDL_GPUTransferBuffer *transferBuffer)
 {
-    WebGPUBuffer *buffer = (WebGPUBuffer *)transferBuffer;
+    WebGPUBufferContainer *container = (WebGPUBufferContainer *)transferBuffer;
+    WebGPUBuffer *buffer = (WebGPUBuffer *)container->activeBufferHandle->webgpuBuffer;
 
     if (buffer && buffer->buffer) {
         wgpuBufferUnmap(buffer->buffer);
@@ -1937,8 +1969,11 @@ static void WebGPU_UploadToBuffer(SDL_GPUCommandBuffer *commandBuffer,
     (void)cycle;
 
     WebGPUCommandBuffer *webgpuCmdBuffer = (WebGPUCommandBuffer *)commandBuffer;
-    WebGPUBuffer *srcBuffer = (WebGPUBuffer *)source->transfer_buffer;
-    WebGPUBuffer *dstBuffer = (WebGPUBuffer *)destination->buffer;
+    WebGPUBufferContainer *srcContainer = (WebGPUBufferContainer *)source->transfer_buffer;
+    WebGPUBufferContainer *dstContainer = (WebGPUBufferContainer *)destination->buffer;
+
+    WebGPUBuffer *srcBuffer = srcContainer->activeBufferHandle->webgpuBuffer;
+    WebGPUBuffer *dstBuffer = dstContainer->activeBufferHandle->webgpuBuffer;
 
     if (!srcBuffer || !srcBuffer->buffer || !dstBuffer || !dstBuffer->buffer) {
         SDL_LogError(SDL_LOG_CATEGORY_GPU, "Invalid buffer");
@@ -2024,7 +2059,8 @@ static void WebGPU_BindVertexBuffers(
     // WebGPU requires us to set vertex buffers individually
     for (Uint32 i = 0; i < numBindings; i++) {
         const SDL_GPUBufferBinding *binding = &bindings[i];
-        WebGPUBuffer *buffer = (WebGPUBuffer *)binding->buffer;
+        WebGPUBufferContainer *container = (WebGPUBufferContainer *)binding->buffer;
+        WebGPUBuffer *buffer = container->activeBufferHandle->webgpuBuffer;
 
         if (!buffer || !buffer->buffer) {
             SDL_SetError("Invalid buffer at binding %u", i);
@@ -2060,7 +2096,8 @@ static void WebGPU_BindIndexBuffer(SDL_GPUCommandBuffer *commandBuffer,
         return;
     }
 
-    WebGPUBuffer *buffer = (WebGPUBuffer *)binding->buffer;
+    WebGPUBufferContainer *container = (WebGPUBufferContainer *)binding->buffer;
+    WebGPUBuffer *buffer = (WebGPUBuffer *)container->activeBufferHandle->webgpuBuffer;
 
     if (!buffer || !buffer->buffer) {
         SDL_SetError("Invalid buffer");
@@ -2659,6 +2696,26 @@ static void WebGPU_ReleaseTexture(
     SDL_free(webgpuTexture);
 }
 
+static void WebGPU_SetTextureName(
+    SDL_GPURenderer *driverData,
+    SDL_GPUTexture *texture,
+    const char *name)
+{
+    SDL_assert(driverData && "Driver data must not be NULL when setting a texture name");
+    SDL_assert(texture && "Texture must not be NULL when setting a texture name");
+
+    WebGPUTextureContainer *container = (WebGPUTextureContainer *)texture;
+    WebGPUTextureHandle *textureHandle = container->activeTextureHandle;
+    WebGPUTexture *webgpuTexture = textureHandle->webgpuTexture;
+
+    // Set the texture name
+    SDL_free((void *)container->debugName);
+    container->debugName = SDL_strdup(name);
+
+    // Set the texture view name
+    wgpuTextureViewSetLabel(webgpuTexture->fullView, name);
+}
+
 static SDL_GPUSampler *WebGPU_CreateSampler(
     SDL_GPURenderer *driverData,
     const SDL_GPUSamplerCreateInfo *createinfo)
@@ -2938,6 +2995,7 @@ static SDL_GPUDevice *WebGPU_CreateDevice(bool debug, bool preferLowPower, SDL_P
 
     result->CreateTexture = WebGPU_CreateTexture;
     result->ReleaseTexture = WebGPU_ReleaseTexture;
+    result->SetTextureName = WebGPU_SetTextureName;
 
     result->CreateSampler = WebGPU_CreateSampler;
     result->ReleaseSampler = WebGPU_ReleaseSampler;
