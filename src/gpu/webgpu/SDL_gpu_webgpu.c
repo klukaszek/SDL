@@ -126,6 +126,7 @@ typedef struct WebGPUBuffer WebGPUBuffer;
 typedef struct WebGPUBufferContainer WebGPUBufferContainer;
 typedef struct WebGPUTexture WebGPUTexture;
 typedef struct WebGPUTextureContainer WebGPUTextureContainer;
+typedef struct WebGPUSampler WebGPUSampler;
 
 typedef struct WebGPUShader
 {
@@ -180,6 +181,7 @@ typedef struct WebGPUBuffer
     bool isMapped;
     void *mappedData;
     SDL_AtomicInt mappingComplete;
+    char debugName[128];
 } WebGPUBuffer;
 
 typedef struct WebGPUBufferContainer
@@ -308,8 +310,13 @@ struct WebGPUTextureContainer
     char *debugName;
 };
 
-// Swapchain structures
+typedef struct WebGPUSampler
+{
+    WGPUSampler sampler;
+    SDL_AtomicInt referenceCount;
+} WebGPUSampler;
 
+// Swapchain structures
 typedef struct SwapchainSupportDetails
 {
     // should just call wgpuSurfaceGetPreferredFormat
@@ -431,6 +438,44 @@ static WGPUStoreOp SDLToWGPUStoreOp(SDL_GPUStoreOp storeOp)
         return WGPUStoreOp_Discard;
     default:
         return WGPUStoreOp_Store;
+    }
+}
+
+static WGPUAddressMode SDLToWGPUAddressMode(SDL_GPUSamplerAddressMode addressMode)
+{
+    switch (addressMode) {
+    case SDL_GPU_SAMPLERADDRESSMODE_CLAMP_TO_EDGE:
+        return WGPUAddressMode_ClampToEdge;
+    case SDL_GPU_SAMPLERADDRESSMODE_REPEAT:
+        return WGPUAddressMode_Repeat;
+    case SDL_GPU_SAMPLERADDRESSMODE_MIRRORED_REPEAT:
+        return WGPUAddressMode_MirrorRepeat;
+    default:
+        return WGPUAddressMode_ClampToEdge;
+    }
+}
+
+static WGPUFilterMode SDLToWGPUFilterMode(SDL_GPUFilter filterMode)
+{
+    switch (filterMode) {
+    case SDL_GPU_FILTER_NEAREST:
+        return WGPUFilterMode_Nearest;
+    case SDL_GPU_FILTER_LINEAR:
+        return WGPUFilterMode_Linear;
+    default:
+        return WGPUFilterMode_Nearest;
+    }
+}
+
+static WGPUMipmapFilterMode SDLToWGPUSamplerMipmapMode(SDL_GPUSamplerMipmapMode mipmapMode)
+{
+    switch (mipmapMode) {
+    case SDL_GPU_SAMPLERMIPMAPMODE_NEAREST:
+        return WGPUMipmapFilterMode_Nearest;
+    case SDL_GPU_SAMPLERMIPMAPMODE_LINEAR:
+        return WGPUMipmapFilterMode_Linear;
+    default:
+        return WGPUMipmapFilterMode_Undefined;
     }
 }
 
@@ -1592,7 +1637,7 @@ static bool WebGPU_SupportsTextureFormat(SDL_GPURenderer *driverData,
                                          SDL_GPUTextureType type,
                                          SDL_GPUTextureUsageFlags usage)
 {
-    WebGPURenderer *renderer = (WebGPURenderer *)driverData;
+    (void)driverData;
     WGPUTextureFormat wgpuFormat = SDLToWGPUTextureFormat(format);
     WGPUTextureUsageFlags wgpuUsage = SDLToWGPUTextureUsageFlags(usage);
     WGPUTextureDimension dimension = WGPUTextureDimension_Undefined;
@@ -1750,6 +1795,24 @@ static void WebGPU_ReleaseBuffer(SDL_GPURenderer *driverData, SDL_GPUBuffer *buf
         wgpuBufferRelease(webgpuBuffer->buffer);
     }
     SDL_free(webgpuBuffer);
+}
+
+static void WebGPU_SetBufferName(SDL_GPURenderer *driverData,
+                                 SDL_GPUBuffer *buffer,
+                                 const char *text)
+{
+    if (!buffer) {
+        return;
+    }
+
+    if (strlen(text) > 128) {
+        SDL_LogError(SDL_LOG_CATEGORY_GPU, "Buffer name is too long");
+        return;
+    }
+
+    WebGPUBuffer *webgpuBuffer = (WebGPUBuffer *)buffer;
+    memcpy(webgpuBuffer->debugName, text, strlen(text));
+    wgpuBufferSetLabel(webgpuBuffer->buffer, text);
 }
 
 static SDL_GPUTransferBuffer *WebGPU_CreateTransferBuffer(
@@ -2596,6 +2659,65 @@ static void WebGPU_ReleaseTexture(
     SDL_free(webgpuTexture);
 }
 
+static SDL_GPUSampler *WebGPU_CreateSampler(
+    SDL_GPURenderer *driverData,
+    const SDL_GPUSamplerCreateInfo *createinfo)
+{
+    SDL_assert(driverData && "Driver data must not be NULL when creating a sampler");
+    SDL_assert(createinfo && "Sampler create info must not be NULL when creating a sampler");
+
+    WebGPURenderer *renderer = (WebGPURenderer *)driverData;
+    WebGPUSampler *sampler = SDL_calloc(1, sizeof(WebGPUSampler));
+    if (!sampler) {
+        SDL_OutOfMemory();
+        return NULL;
+    }
+
+    WGPUSamplerDescriptor samplerDesc = {
+        .label = "SDL_GPU WebGPU Sampler",
+        .addressModeU = SDLToWGPUAddressMode(createinfo->address_mode_u),
+        .addressModeV = SDLToWGPUAddressMode(createinfo->address_mode_v),
+        .addressModeW = SDLToWGPUAddressMode(createinfo->address_mode_w),
+        .magFilter = SDLToWGPUFilterMode(createinfo->mag_filter),
+        .minFilter = SDLToWGPUFilterMode(createinfo->min_filter),
+        .mipmapFilter = SDLToWGPUSamplerMipmapMode(createinfo->mipmap_mode),
+        .lodMinClamp = createinfo->min_lod,
+        .lodMaxClamp = createinfo->max_lod,
+        .compare = SDLToWGPUCompareFunction(createinfo->compare_op),
+        .maxAnisotropy = (uint16_t)createinfo->max_anisotropy,
+    };
+
+    WGPUSampler wgpuSampler = wgpuDeviceCreateSampler(renderer->device, &samplerDesc);
+    if (wgpuSampler == NULL) {
+        SDL_LogError(SDL_LOG_CATEGORY_GPU, "Failed to create sampler");
+        SDL_free(sampler);
+        SDL_OutOfMemory();
+        return NULL;
+    }
+
+    sampler->sampler = wgpuSampler;
+    return (SDL_GPUSampler *)sampler;
+}
+
+static void WebGPU_ReleaseSampler(
+    SDL_GPURenderer *driverData,
+    SDL_GPUSampler *sampler)
+{
+    SDL_assert(driverData && "Driver data must not be NULL when destroying a sampler");
+    SDL_assert(sampler && "Sampler must not be NULL when destroying a sampler");
+
+    WebGPUSampler *webgpuSampler = (WebGPUSampler *)sampler;
+
+    // Check if any references to the sampler exist
+    if (SDL_GetAtomicInt(&webgpuSampler->referenceCount) > 0) {
+        SDL_LogError(SDL_LOG_CATEGORY_GPU, "Cannot destroy sampler with active references");
+        return;
+    }
+
+    wgpuSamplerRelease(webgpuSampler->sampler);
+    SDL_free(webgpuSampler);
+}
+
 void WebGPU_SetViewport(SDL_GPUCommandBuffer *renderPass, const SDL_GPUViewport *viewport)
 {
     if (renderPass == NULL) {
@@ -2806,6 +2928,7 @@ static SDL_GPUDevice *WebGPU_CreateDevice(bool debug, bool preferLowPower, SDL_P
 
     result->CreateBuffer = WebGPU_CreateGPUBuffer;
     result->ReleaseBuffer = WebGPU_ReleaseBuffer;
+    result->SetBufferName = WebGPU_SetBufferName;
     result->CreateTransferBuffer = WebGPU_CreateTransferBuffer;
     result->ReleaseTransferBuffer = WebGPU_ReleaseTransferBuffer;
     result->MapTransferBuffer = WebGPU_MapTransferBuffer;
@@ -2815,6 +2938,9 @@ static SDL_GPUDevice *WebGPU_CreateDevice(bool debug, bool preferLowPower, SDL_P
 
     result->CreateTexture = WebGPU_CreateTexture;
     result->ReleaseTexture = WebGPU_ReleaseTexture;
+
+    result->CreateSampler = WebGPU_CreateSampler;
+    result->ReleaseSampler = WebGPU_ReleaseSampler;
 
     result->BindVertexBuffers = WebGPU_BindVertexBuffers;
     result->BindIndexBuffer = WebGPU_BindIndexBuffer;
