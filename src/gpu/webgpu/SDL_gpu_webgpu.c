@@ -1802,12 +1802,17 @@ static SDL_GPUBuffer *WebGPU_CreateGPUBuffer(SDL_GPURenderer *driverData,
 static void WebGPU_ReleaseBuffer(SDL_GPURenderer *driverData, SDL_GPUBuffer *buffer)
 {
     WebGPUBufferContainer *container = (WebGPUBufferContainer *)buffer;
+
+    // Buffer count should be 1, but just in case
     for (Uint32 i = 0; i < container->bufferCount; i += 1) {
         WebGPUBufferHandle *handle = container->bufferHandles[i];
         WebGPUBuffer *webgpuBuffer = handle->webgpuBuffer;
-        if (webgpuBuffer->buffer) {
+
+        // if reference count == 0, release the buffer
+        if (SDL_GetAtomicInt(&webgpuBuffer->referenceCount) == 0) {
             wgpuBufferRelease(webgpuBuffer->buffer);
         }
+
         SDL_free(handle);
     }
 
@@ -2677,23 +2682,30 @@ static void WebGPU_ReleaseTexture(
     SDL_assert(texture && "Texture must not be NULL when destroying a texture");
 
     WebGPUTextureContainer *container = (WebGPUTextureContainer *)texture;
-    WebGPUTextureHandle *textureHandle = container->activeTextureHandle;
-    WebGPUTexture *webgpuTexture = textureHandle->webgpuTexture;
 
-    // Release the texture view
-    wgpuTextureViewRelease(webgpuTexture->fullView);
+    // Texture count will always be 1 for now
+    for (Uint32 i = 0; i < container->textureCount; i++) {
+        WebGPUTextureHandle *textureHandle = container->textureHandles[i];
+        WebGPUTexture *webgpuTexture = textureHandle->webgpuTexture;
 
-    // Release the texture
-    wgpuTextureRelease(webgpuTexture->texture);
+        // Check if any references to the texture exist
+        if (SDL_GetAtomicInt(&webgpuTexture->referenceCount) > 0) {
+            SDL_LogError(SDL_LOG_CATEGORY_GPU, "Cannot destroy texture with active references");
+            return;
+        }
 
-    // Free the texture handle
-    SDL_free(textureHandle);
+        // Release the texture view
+        wgpuTextureViewRelease(webgpuTexture->fullView);
 
-    // Free the texture container
-    SDL_free(container);
+        // Release the texture
+        wgpuTextureRelease(webgpuTexture->texture);
 
-    // Free the texture
-    SDL_free(webgpuTexture);
+        // Free the texture handle
+        SDL_free(textureHandle);
+
+        // Free the texture
+        SDL_free(webgpuTexture);
+    }
 }
 
 static void WebGPU_SetTextureName(
@@ -2714,6 +2726,18 @@ static void WebGPU_SetTextureName(
 
     // Set the texture view name
     wgpuTextureViewSetLabel(webgpuTexture->fullView, name);
+}
+
+static void WebGPU_UploadToTexture(SDL_GPUCommandBuffer *commandBuffer,
+                                   const SDL_GPUTextureTransferInfo *source,
+                                   const SDL_GPUTextureRegion *destination,
+                                   bool cycle)
+{
+    (void)cycle;
+    if (!commandBuffer || !source || !destination) {
+        SDL_LogError(SDL_LOG_CATEGORY_GPU, "Invalid parameters for uploading to texture");
+        return;
+    }
 }
 
 static SDL_GPUSampler *WebGPU_CreateSampler(
@@ -2996,6 +3020,7 @@ static SDL_GPUDevice *WebGPU_CreateDevice(bool debug, bool preferLowPower, SDL_P
     result->CreateTexture = WebGPU_CreateTexture;
     result->ReleaseTexture = WebGPU_ReleaseTexture;
     result->SetTextureName = WebGPU_SetTextureName;
+    result->UploadToTexture = WebGPU_UploadToTexture;
 
     result->CreateSampler = WebGPU_CreateSampler;
     result->ReleaseSampler = WebGPU_ReleaseSampler;
