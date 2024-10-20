@@ -4,6 +4,8 @@
 // License: Zlib
 // Description: WebGPU driver for SDL_gpu using the emscripten WebGPU implementation
 // Note: Compiling SDL GPU programs using emscripten will require -sUSE_WEBGPU=1 -sASYNCIFY=1
+//
+// TODO: Continue implementing BindGroupLayouts and BindGroups
 
 #include "../SDL_sysgpu.h"
 #include "SDL_internal.h"
@@ -17,10 +19,12 @@
 #include <emscripten/html5.h>
 #include <stdint.h>
 #include <webgpu/webgpu.h>
+#include <regex.h>
 
 #define MAX_UBO_SECTION_SIZE          4096 // 4   KiB
 #define DESCRIPTOR_POOL_STARTING_SIZE 128
 #define WINDOW_PROPERTY_DATA          "SDL_GPUWebGPUWindowPropertyData"
+#define MAX_BIND_GROUPS               8
 
 #define EXPAND_ELEMENTS_IF_NEEDED(arr, initialValue, type) \
     if (arr->count == arr->capacity) {                     \
@@ -75,50 +79,27 @@ typedef enum WebGPUBindingType
     WGPUBindingType_Buffer = 0x00000001,
     WGPUBindingType_Sampler = 0x00000002,
     WGPUBindingType_Texture = 0x00000003,
-    WGPUBindingType_StorageTexture = 0x00000004,
-
-    // Buffer sub-types
-    WGPUBindingType_UniformBuffer = 0x00000011,
-    WGPUBindingType_StorageBuffer = 0x00000012,
-    WGPUBindingType_ReadOnlyStorageBuffer = 0x00000013,
-
-    // Sampler sub-types
-    WGPUBindingType_FilteringSampler = 0x00000022,
-    WGPUBindingType_NonFilteringSampler = 0x00000023,
-    WGPUBindingType_ComparisonSampler = 0x00000024,
-
-    // Texture sub-types
-    WGPUBindingType_FilteringTexture = 0x00000033,
-    WGPUBindingType_NonFilteringTexture = 0x00000034,
-
-    // Storage Texture sub-types (access modes)
-    WGPUBindingType_WriteOnlyStorageTexture = 0x00000044,
-    WGPUBindingType_ReadOnlyStorageTexture = 0x00000045,
-    WGPUBindingType_ReadWriteStorageTexture = 0x00000046,
+    /*WGPUBindingType_StorageTexture = 0x00000004,*/
+    /**/
+    /*// Buffer sub-types*/
+    /*WGPUBindingType_UniformBuffer = 0x00000011,*/
+    /*WGPUBindingType_StorageBuffer = 0x00000012,*/
+    /*WGPUBindingType_ReadOnlyStorageBuffer = 0x00000013,*/
+    /**/
+    /*// Sampler sub-types*/
+    /*WGPUBindingType_FilteringSampler = 0x00000022,*/
+    /*WGPUBindingType_NonFilteringSampler = 0x00000023,*/
+    /*WGPUBindingType_ComparisonSampler = 0x00000024,*/
+    /**/
+    /*// Texture sub-types*/
+    /*WGPUBindingType_FilteringTexture = 0x00000033,*/
+    /*WGPUBindingType_NonFilteringTexture = 0x00000034,*/
+    /**/
+    /*// Storage Texture sub-types (access modes)*/
+    /*WGPUBindingType_WriteOnlyStorageTexture = 0x00000044,*/
+    /*WGPUBindingType_ReadOnlyStorageTexture = 0x00000045,*/
+    /*WGPUBindingType_ReadWriteStorageTexture = 0x00000046,*/
 } WebGPUBindingType;
-
-typedef enum WebGPUBufferType
-{
-    WEBGPU_BUFFER_TYPE_GPU,
-    WEBGPU_BUFFER_TYPE_UNIFORM,
-    WEBGPU_BUFFER_TYPE_TRANSFER
-} WebGPUBufferType;
-
-// Shader Reflection Definitions:
-// ---------------------------------------------------
-typedef struct ReflectedBinding
-{
-    uint32_t set;
-    uint32_t binding;
-    WebGPUBindingType type;
-    WGPUShaderStageFlags stages;
-} ReflectedBinding;
-
-typedef struct ReflectedBindGroup
-{
-    ReflectedBinding *bindings;
-    uint32_t bindingCount;
-} ReflectedBindGroup;
 
 // WebGPU Structures
 // ---------------------------------------------------
@@ -127,18 +108,6 @@ typedef struct WebGPUBufferContainer WebGPUBufferContainer;
 typedef struct WebGPUTexture WebGPUTexture;
 typedef struct WebGPUTextureContainer WebGPUTextureContainer;
 typedef struct WebGPUSampler WebGPUSampler;
-
-typedef struct WebGPUShader
-{
-    char *wgslSource;
-    WGPUShaderModule shaderModule;
-    const char *entrypoint;
-    Uint32 samplerCount;
-    Uint32 storageTextureCount;
-    Uint32 storageBufferCount;
-    Uint32 uniformBufferCount;
-    SDL_AtomicInt referenceCount;
-} WebGPUShader;
 
 typedef struct WebGPUViewport
 {
@@ -159,8 +128,13 @@ typedef struct WebGPURect
 } WebGPURect;
 
 // Buffer structures
-
-#define MAX_BIND_GROUPS 4
+// ---------------------------------------------------
+typedef enum WebGPUBufferType
+{
+    WEBGPU_BUFFER_TYPE_GPU,
+    WEBGPU_BUFFER_TYPE_UNIFORM,
+    WEBGPU_BUFFER_TYPE_TRANSFER
+} WebGPUBufferType;
 
 typedef struct WebGPUBufferHandle
 {
@@ -192,63 +166,46 @@ typedef struct WebGPUBufferContainer
     char *debugName;
 } WebGPUBufferContainer;
 
-// Bind Group definitions
-
-typedef struct WebGPUBindGroupEntry
+// Bind Group Layout definitions
+// ---------------------------------------------------
+typedef struct WebGPUBindingInfo
 {
+    uint32_t group;
+    uint32_t binding;
     WebGPUBindingType type;
-    union
-    {
-        struct
-        {
-            WebGPUBufferHandle *bufferHandle;
-            uint32_t offset;
-            uint32_t size;
-        } buffer;
-        WGPUTextureView textureView;
-        WGPUSampler sampler;
-    };
-} WebGPUBindGroupEntry;
-
-typedef struct WebGPUBindGroup
-{
-    WGPUBindGroup bindGroup;
-    WebGPUBindGroupEntry *entries;
-    uint32_t entryCount;
-} WebGPUBindGroup;
+} WebGPUBindingInfo;
 
 typedef struct WebGPUBindGroupLayout
 {
-    WGPUBindGroupLayout layout;
-    WGPUShaderStageFlags *stageFlags;
-    WebGPUBindingType *types;
-    uint32_t entryCount;
+    int group;
+    WebGPUBindingInfo *bindings;
+    uint32_t bindingCount;
 } WebGPUBindGroupLayout;
 
-// Graphics Pipeline definitions
 typedef struct WebGPUPipelineResourceLayout
 {
     WGPUPipelineLayout pipelineLayout;
     WebGPUBindGroupLayout bindGroupLayouts[MAX_BIND_GROUPS];
     uint32_t bindGroupLayoutCount;
 } WebGPUPipelineResourceLayout;
+// ---------------------------------------------------
 
-typedef struct WebGPUGraphicsPipeline
+// Bind Group Functions For Binding
+// ---------------------------------------------------
+typedef struct WebGPUBindGroup
 {
-    WGPURenderPipeline pipeline;
-    SDL_GPUPrimitiveType primitiveType;
-    WebGPUPipelineResourceLayout *resourceLayout;
-    WebGPUShader *vertexShader;
-    WebGPUShader *fragmentShader;
-    WGPURenderPipelineDescriptor pipelineDesc;
-    SDL_AtomicInt referenceCount;
-} WebGPUGraphicsPipeline;
+    WGPUBindGroup bindGroup;
+    /*Binding *entries;*/
+    uint32_t entryCount;
+} WebGPUBindGroup;
 
 typedef struct WebGPUPipelineResources
 {
     WebGPUBindGroup bindGroups[MAX_BIND_GROUPS];
     uint32_t bindGroupCount;
 } WebGPUPipelineResources;
+
+// ---------------------------------------------------
 
 // Texture structures
 
@@ -354,6 +311,30 @@ typedef struct WindowData
     bool needsSwapchainRecreate;
 } WindowData;
 
+typedef struct WebGPUShader
+{
+    char *wgslSource;
+    WGPUShaderModule shaderModule;
+    const char *entrypoint;
+    Uint32 samplerCount;
+    Uint32 storageTextureCount;
+    Uint32 storageBufferCount;
+    Uint32 uniformBufferCount;
+    SDL_AtomicInt referenceCount;
+} WebGPUShader;
+
+// Graphics Pipeline definitions
+typedef struct WebGPUGraphicsPipeline
+{
+    WGPURenderPipeline pipeline;
+    SDL_GPUPrimitiveType primitiveType;
+    WebGPUPipelineResourceLayout *resourceLayout;
+    WebGPUShader *vertexShader;
+    WebGPUShader *fragmentShader;
+    WGPURenderPipelineDescriptor pipelineDesc;
+    SDL_AtomicInt referenceCount;
+} WebGPUGraphicsPipeline;
+
 // Renderer Structure
 typedef struct WebGPURenderer WebGPURenderer;
 
@@ -400,6 +381,68 @@ typedef struct WebGPURenderer
 } WebGPURenderer;
 
 // ---------------------------------------------------
+
+// Shader Reflection Functions
+// ---------------------------------------------------
+static WebGPUBindingType DetectBindingType(const char *line)
+{
+    if (SDL_strstr(line, "buffer") != NULL) {
+        return WGPUBindingType_Buffer;
+    } else if (SDL_strstr(line, "uniform") != NULL) {
+        return WGPUBindingType_Buffer;
+    } else if (SDL_strstr(line, "sampler") != NULL) {
+        return WGPUBindingType_Sampler;
+    } else if (SDL_strstr(line, "texture") != NULL) {
+        return WGPUBindingType_Texture;
+    } else {
+        return WGPUBindingType_Undefined;
+    }
+}
+
+static WebGPUBindingInfo *ExtractBindingsFromShader(const char *shaderCode, uint32_t *outBindingCount)
+{
+    const char *pattern = "@group\\((\\d+)\\)\\s*@binding\\((\\d+)\\)";
+    regex_t regex;
+    regmatch_t matches[3]; // 0 is the entire match, 1 is group, 2 is binding
+
+    if (regcomp(&regex, pattern, REG_EXTENDED)) {
+        fprintf(stderr, "Failed to compile regex\n");
+        return NULL;
+    }
+
+    // Allocate an initial array for bindings
+    int capacity = 10;
+    uint32_t count = 0;
+    WebGPUBindingInfo *bindings = (WebGPUBindingInfo *)malloc(capacity * sizeof(WebGPUBindingInfo));
+
+    const char *cursor = shaderCode;
+    while (regexec(&regex, cursor, 3, matches, 0) == 0) {
+        if (count >= capacity) {
+            capacity *= 2;
+            bindings = (WebGPUBindingInfo *)realloc(bindings, capacity * sizeof(WebGPUBindingInfo));
+        }
+
+        // Extract group and binding numbers
+        char groupStr[16] = { 0 };
+        char bindingStr[16] = { 0 };
+        strncpy(groupStr, cursor + matches[1].rm_so, matches[1].rm_eo - matches[1].rm_so);
+        strncpy(bindingStr, cursor + matches[2].rm_so, matches[2].rm_eo - matches[2].rm_so);
+
+        bindings[count].group = atoi(groupStr);
+        bindings[count].binding = atoi(bindingStr);
+        bindings[count].type = DetectBindingType(cursor); // Detect the type of resource on this line
+        count++;
+
+        SDL_Log("Found binding: group=%d, binding=%d, type=%d", bindings[count - 1].group, bindings[count - 1].binding, bindings[count - 1].type);
+
+        cursor += matches[0].rm_eo;
+    }
+
+    regfree(&regex);
+
+    *outBindingCount = count;
+    return bindings;
+}
 
 // Conversion Functions:
 // ---------------------------------------------------
@@ -1042,169 +1085,9 @@ static WGPUVertexFormat SDLToWGPUVertexFormat(SDL_GPUVertexElementFormat format)
 
 // WGPU Bind Group Layout Functions
 // ---------------------------------------------------
-static void WebGPU_CreateBindingLayout(WGPUBindGroupLayoutEntry *entry, ReflectedBinding *binding)
+static void WebGPU_CreateBindingLayout(WGPUBindGroupLayoutEntry *entry, WebGPUBindingInfo *binding)
 {
-    switch (binding->type) {
-    case WGPUBindingType_Buffer:
-    case WGPUBindingType_UniformBuffer:
-        entry->buffer = (WGPUBufferBindingLayout){
-            .type = WGPUBufferBindingType_Uniform,
-            .hasDynamicOffset = false,
-            .minBindingSize = 0,
-        };
-        break;
-    case WGPUBindingType_StorageBuffer:
-        entry->buffer = (WGPUBufferBindingLayout){
-            .type = WGPUBufferBindingType_Storage,
-            .hasDynamicOffset = false,
-            .minBindingSize = 0,
-        };
-        break;
-    case WGPUBindingType_ReadOnlyStorageBuffer:
-        entry->buffer = (WGPUBufferBindingLayout){
-            .type = WGPUBufferBindingType_ReadOnlyStorage,
-            .hasDynamicOffset = false,
-            .minBindingSize = 0,
-        };
-        break;
-    case WGPUBindingType_Texture:
-    case WGPUBindingType_FilteringTexture:
-    case WGPUBindingType_NonFilteringTexture:
-        entry->texture = (WGPUTextureBindingLayout){
-            .sampleType = WGPUTextureSampleType_Float,
-            .viewDimension = WGPUTextureViewDimension_2D,
-            .multisampled = false,
-        };
-        break;
-    case WGPUBindingType_StorageTexture:
-    case WGPUBindingType_WriteOnlyStorageTexture:
-        entry->storageTexture = (WGPUStorageTextureBindingLayout){
-            .access = WGPUStorageTextureAccess_WriteOnly,
-            .format = WGPUTextureFormat_RGBA8Unorm,
-            .viewDimension = WGPUTextureViewDimension_2D,
-        };
-        break;
-    case WGPUBindingType_ReadOnlyStorageTexture:
-        entry->storageTexture = (WGPUStorageTextureBindingLayout){
-            .access = WGPUStorageTextureAccess_ReadOnly,
-            .format = WGPUTextureFormat_RGBA8Unorm,
-            .viewDimension = WGPUTextureViewDimension_2D,
-        };
-        break;
-    case WGPUBindingType_ReadWriteStorageTexture:
-        entry->storageTexture = (WGPUStorageTextureBindingLayout){
-            .access = WGPUStorageTextureAccess_ReadWrite,
-            .format = WGPUTextureFormat_RGBA8Unorm,
-            .viewDimension = WGPUTextureViewDimension_2D,
-        };
-        break;
-    case WGPUBindingType_Sampler:
-    case WGPUBindingType_FilteringSampler:
-        entry->sampler = (WGPUSamplerBindingLayout){
-            .type = WGPUSamplerBindingType_Filtering,
-        };
-        break;
-    case WGPUBindingType_NonFilteringSampler:
-        entry->sampler = (WGPUSamplerBindingLayout){
-            .type = WGPUSamplerBindingType_NonFiltering,
-        };
-        break;
-    case WGPUBindingType_ComparisonSampler:
-        entry->sampler = (WGPUSamplerBindingLayout){
-            .type = WGPUSamplerBindingType_Comparison,
-        };
-        break;
-    default:
-        SDL_LogError(SDL_LOG_CATEGORY_GPU, "Invalid binding type %d", binding->type);
-        break;
-    };
-}
-
-static WebGPUPipelineResourceLayout *CreateResourceLayoutFromReflection(
-    WebGPURenderer *renderer,
-    ReflectedBindGroup *vertexBindGroups,
-    uint32_t vertexBindGroupCount,
-    ReflectedBindGroup *fragmentBindGroups,
-    uint32_t fragmentBindGroupCount)
-{
-    WebGPUPipelineResourceLayout *layout = SDL_malloc(sizeof(WebGPUPipelineResourceLayout));
-    layout->bindGroupLayoutCount = SDL_max(vertexBindGroupCount, fragmentBindGroupCount);
-
-    WGPUBindGroupLayoutEntry *entries = NULL;
-
-    SDL_Log("Vertex bind group count: %d", vertexBindGroupCount);
-    SDL_Log("Fragment bind group count: %d", fragmentBindGroupCount);
-
-    for (uint32_t i = 0; i < layout->bindGroupLayoutCount; i++) {
-        SDL_Log("Creating bind group layout %d", i);
-        uint32_t entryCount = 0;
-        // Combine vertex and fragment bindings
-        if (i < vertexBindGroupCount) {
-            SDL_Log("Processing vertex bindgroup %d, with %u bindings", i, vertexBindGroups[i].bindingCount);
-            for (uint32_t j = 0; j < vertexBindGroups[i].bindingCount; j++) {
-                ReflectedBindGroup *bindGroup = &vertexBindGroups[i];
-                SDL_Log("Retrieving binding %d", j);
-                ReflectedBinding *binding = &bindGroup->bindings[j];
-                SDL_Log("Binding %d, set %d, binding %d, type %d, stages %d", j, binding->set, binding->binding, binding->type, binding->stages);
-                entries = SDL_realloc(entries, (entryCount + 1) * sizeof(WGPUBindGroupLayoutEntry));
-                entries[entryCount] = (WGPUBindGroupLayoutEntry){
-                    .binding = binding->binding,
-                    .visibility = binding->stages,
-                };
-
-                // Assign the correct binding layout type to the BindingLayoutEntry
-                // This can be a buffer, texture, sampler, etc.
-                WebGPU_CreateBindingLayout(&entries[entryCount], binding);
-
-                entryCount++;
-            }
-        }
-
-        if (i < fragmentBindGroupCount) {
-            for (uint32_t j = 0; j < fragmentBindGroups[i].bindingCount; j++) {
-                ReflectedBinding *binding = &fragmentBindGroups[i].bindings[j];
-                // Check if this binding already exists from vertex stage
-                bool found = false;
-                for (uint32_t k = 0; k < entryCount; k++) {
-                    if (entries[k].binding == binding->binding) {
-                        entries[k].visibility |= binding->stages;
-                        found = true;
-                        break;
-                    }
-                }
-                if (!found) {
-                    entries = SDL_realloc(entries, (entryCount + 1) * sizeof(WGPUBindGroupLayoutEntry));
-                    entries[entryCount] = (WGPUBindGroupLayoutEntry){
-                        .binding = binding->binding,
-                        .visibility = binding->stages,
-                    };
-
-                    // Assign the correct binding layout type to the BindingLayoutEntry
-                    // This can be a buffer, texture, sampler, etc.
-                    WebGPU_CreateBindingLayout(&entries[entryCount], binding);
-
-                    entryCount++;
-                }
-            }
-        }
-
-        WGPUBindGroupLayoutDescriptor bindGroupLayoutDesc = {
-            .entryCount = entryCount,
-            .entries = entries
-        };
-
-        layout->bindGroupLayouts[i].layout = wgpuDeviceCreateBindGroupLayout(renderer->device, &bindGroupLayoutDesc);
-        layout->bindGroupLayouts[i].entryCount = entryCount;
-        layout->bindGroupLayouts[i].stageFlags = SDL_malloc(entryCount * sizeof(WGPUShaderStageFlags));
-
-        for (uint32_t j = 0; j < entryCount; j++) {
-            layout->bindGroupLayouts[i].stageFlags[j] = entries[j].visibility;
-        }
-
-        SDL_free(entries);
-    }
-
-    return layout;
+    // TODO: Implement this function
 }
 
 // WebGPU Functions:
@@ -2325,37 +2208,39 @@ static SDL_GPUGraphicsPipeline *WebGPU_CreateGraphicsPipeline(
     WebGPUShader *vertShader = (WebGPUShader *)pipelineCreateInfo->vertex_shader;
     WebGPUShader *fragShader = (WebGPUShader *)pipelineCreateInfo->fragment_shader;
 
-    // TODO: Find a new way to reflect bindings now that we are using WGSL instead of SPIR-V
-    uint32_t vertexBindGroupCount = 0;
-    uint32_t fragmentBindGroupCount = 0;
-    ReflectedBindGroup *vertexBindGroups = NULL;
-    ReflectedBindGroup *fragmentBindGroups = NULL;
+    // Create some structure to hold our BindGroupLayouts for our graphics pipeline
+    WebGPUPipelineResourceLayout *resourceLayout = SDL_malloc(sizeof(WebGPUPipelineResourceLayout));
+    for (size_t i = 0; i < 8; i++) {
+        resourceLayout->bindGroupLayouts[i].group = i;
+        resourceLayout->bindGroupLayouts[i].bindings = NULL;
+        resourceLayout->bindGroupLayouts[i].bindingCount = 0;
+    }
 
-    // TODO: For now this will be a placeholder until we can reflect bindings from WGSL
-    WebGPUPipelineResourceLayout *resourceLayout = CreateResourceLayoutFromReflection(renderer,
-                                                                                      vertexBindGroups,
-                                                                                      vertexBindGroupCount,
-                                                                                      fragmentBindGroups,
-                                                                                      fragmentBindGroupCount);
+    uint32_t vertBindingCount = 0;
+    uint32_t fragBindingCount = 0;
+    WebGPUBindingInfo *bindingInfo = ExtractBindingsFromShader(vertShader->wgslSource, &vertBindingCount);
+    WebGPUBindingInfo *fragBindingInfo = ExtractBindingsFromShader(fragShader->wgslSource, &fragBindingCount);
 
-    wgpuDeviceSetUncapturedErrorCallback(renderer->device, WebGPU_ErrorCallback, renderer);
+    uint32_t bindingCount = SDL_max(vertBindingCount, fragBindingCount);
+
+    // TODO: Implement the rest of the pipeline creation
+    WebGPUPipelineResourceLayout layout = {
+        .pipelineLayout = NULL,
+        .bindGroupLayouts = {},
+        .bindGroupLayoutCount = 0,
+    };
 
     // Create the pipeline layout
     WGPUPipelineLayoutDescriptor layoutDesc = {
         .label = "SDL_GPU WebGPU Pipeline Layout",
-        .bindGroupLayoutCount = resourceLayout->bindGroupLayoutCount,
-        .bindGroupLayouts = SDL_malloc(sizeof(WGPUBindGroupLayout) * resourceLayout->bindGroupLayoutCount),
+        .bindGroupLayoutCount = 0,
+        .bindGroupLayouts = SDL_malloc(sizeof(WGPUBindGroupLayout) * 1),
     };
-
-    // Assign the bind group layouts to the pipeline layout
-    for (uint32_t i = 0; i < resourceLayout->bindGroupLayoutCount; i++) {
-        SDL_memcpy(layoutDesc.bindGroupLayouts[i], &resourceLayout->bindGroupLayouts[i].layout, sizeof(WGPUBindGroupLayout));
-    }
 
     // Create the pipeline layout from the descriptor
     WGPUPipelineLayout pipelineLayout = wgpuDeviceCreatePipelineLayout(renderer->device, &layoutDesc);
 
-    resourceLayout->pipelineLayout = pipelineLayout;
+    /*resourceLayout->pipelineLayout = pipelineLayout;*/
 
     const SDL_GPUVertexInputState *vertexInputState = &pipelineCreateInfo->vertex_input_state;
 
@@ -2467,7 +2352,6 @@ static SDL_GPUGraphicsPipeline *WebGPU_CreateGraphicsPipeline(
     pipeline->vertexShader = vertShader;
     pipeline->fragmentShader = fragShader;
     pipeline->primitiveType = pipelineCreateInfo->primitive_type;
-    pipeline->resourceLayout = resourceLayout;
 
     SDL_SetAtomicInt(&pipeline->referenceCount, 1);
 
@@ -2475,7 +2359,6 @@ static SDL_GPUGraphicsPipeline *WebGPU_CreateGraphicsPipeline(
     SDL_free(colorTargets);
     SDL_free(((void *)layoutDesc.bindGroupLayouts));
     wgpuPipelineLayoutRelease(pipelineLayout);
-    SDL_free(resourceLayout);
 
     // Iterate through the VertexBufferLayouts and free the attributes, then free the layout.
     // This can be done since everything has already been copied to the final render pipeline.
@@ -2503,67 +2386,6 @@ static void WebGPU_ReleaseGraphicsPipeline(SDL_GPURenderer *driverData,
             pipeline->pipeline = NULL;
         }
     }
-}
-
-// Helper function to create or update a bind group
-static void WebGPU_INTERNAL_CreateOrUpdateBindGroup(
-    WebGPUCommandBuffer *commandBuffer,
-    WebGPUGraphicsPipeline *pipeline,
-    uint32_t bindGroupIndex)
-{
-    WebGPUBindGroup *bindGroup = &commandBuffer->currentResources.bindGroups[bindGroupIndex];
-    WebGPUBindGroupLayout *layout = &pipeline->resourceLayout->bindGroupLayouts[bindGroupIndex];
-
-    WGPUBindGroupEntry *entries = SDL_malloc(sizeof(WGPUBindGroupEntry) * layout->entryCount);
-
-    for (uint32_t i = 0; i < layout->entryCount; i++) {
-        entries[i].binding = i;
-        entries[i].sampler = NULL;
-        entries[i].textureView = NULL;
-        entries[i].buffer = NULL;
-        entries[i].offset = 0;
-        entries[i].size = 0;
-
-        switch (layout->types[i]) {
-        case WGPUBindingType_Buffer:
-        case WGPUBindingType_UniformBuffer:
-        case WGPUBindingType_StorageBuffer:
-        case WGPUBindingType_ReadOnlyStorageBuffer:
-            entries[i].buffer = bindGroup->entries[i].buffer.bufferHandle->webgpuBuffer->buffer;
-            entries[i].offset = bindGroup->entries[i].buffer.offset;
-            entries[i].size = bindGroup->entries[i].buffer.size;
-            break;
-        case WGPUBindingType_Sampler:
-        case WGPUBindingType_FilteringSampler:
-        case WGPUBindingType_NonFilteringSampler:
-        case WGPUBindingType_ComparisonSampler:
-            entries[i].sampler = bindGroup->entries[i].sampler;
-            break;
-        case WGPUBindingType_FilteringTexture:
-        case WGPUBindingType_NonFilteringTexture:
-            entries[i].textureView = bindGroup->entries[i].textureView;
-            break;
-            // Add cases for other binding types as needed
-        case WGPUBindingType_Undefined:
-        default:
-            SDL_LogError(SDL_LOG_CATEGORY_GPU, "Undefined binding type in bind group layout");
-            break;
-        }
-    }
-
-    WGPUBindGroupDescriptor bindGroupDescriptor = {
-        .layout = layout->layout,
-        .entryCount = layout->entryCount,
-        .entries = entries
-    };
-
-    if (bindGroup->bindGroup != NULL) {
-        wgpuBindGroupRelease(bindGroup->bindGroup);
-    }
-
-    bindGroup->bindGroup = wgpuDeviceCreateBindGroup(commandBuffer->renderer->device, &bindGroupDescriptor);
-
-    SDL_free(entries);
 }
 
 // Texture Functions
@@ -2799,6 +2621,78 @@ static void WebGPU_ReleaseSampler(
     SDL_free(webgpuSampler);
 }
 
+static void WebGPU_BindFragmentSamplers(SDL_GPUCommandBuffer *commandBuffer,
+                                        Uint32 firstSlot,
+                                        const SDL_GPUTextureSamplerBinding *textureSamplerBindings,
+                                        Uint32 numBindings)
+{
+    if (commandBuffer == NULL) {
+        return;
+    }
+
+    WebGPUCommandBuffer *webgpuCommandBuffer = (WebGPUCommandBuffer *)commandBuffer;
+
+    for (Uint32 i = 0; i < numBindings; i += 1) {
+        const SDL_GPUTextureSamplerBinding *binding = &textureSamplerBindings[i];
+        WebGPUSampler *sampler = (WebGPUSampler *)binding->sampler;
+        WebGPUTextureContainer *container = (WebGPUTextureContainer *)binding->texture;
+
+        // Check if the texture container is valid
+        if (container == NULL) {
+            SDL_LogError(SDL_LOG_CATEGORY_GPU, "Texture container is NULL");
+            return;
+        }
+
+        // Check if the texture handle is valid
+        if (container->activeTextureHandle == NULL) {
+            SDL_LogError(SDL_LOG_CATEGORY_GPU, "Texture handle is NULL");
+            return;
+        }
+
+        // Check if the texture is valid
+        if (container->activeTextureHandle->webgpuTexture == NULL) {
+            SDL_LogError(SDL_LOG_CATEGORY_GPU, "Texture is NULL");
+            return;
+        }
+
+        // Check if the sampler is valid
+        if (sampler == NULL) {
+            SDL_LogError(SDL_LOG_CATEGORY_GPU, "Sampler is NULL");
+            return;
+        }
+
+        // Check if the sampler is valid
+        if (sampler->sampler == NULL) {
+            SDL_LogError(SDL_LOG_CATEGORY_GPU, "Sampler is NULL");
+            return;
+        }
+
+        // Create the texture view descriptor
+        WGPUTextureViewDescriptor viewDesc = {
+            .label = "SDL_GPU WebGPU Texture View",
+            .format = container->activeTextureHandle->webgpuTexture->format,
+            .dimension = SDLToWGPUTextureViewDimension(container->header.info.type),
+            .baseMipLevel = 0,
+            .mipLevelCount = container->header.info.num_levels,
+            .baseArrayLayer = 0,
+            .arrayLayerCount = container->header.info.layer_count_or_depth == 0 ? 1 : container->header.info.layer_count_or_depth,
+        };
+
+        // Create the texture view
+        WGPUTextureView textureView = wgpuTextureCreateView(container->activeTextureHandle->webgpuTexture->texture, &viewDesc);
+
+        // Create the bind group entry
+        WGPUBindGroupEntry entry = {
+            .binding = firstSlot + i,
+            .sampler = sampler->sampler,
+            .textureView = textureView,
+            .buffer = NULL,
+            .offset = 0,
+            .size = 0,
+        };
+    }
+}
+
 void WebGPU_SetViewport(SDL_GPUCommandBuffer *renderPass, const SDL_GPUViewport *viewport)
 {
     if (renderPass == NULL) {
@@ -3024,6 +2918,7 @@ static SDL_GPUDevice *WebGPU_CreateDevice(bool debug, bool preferLowPower, SDL_P
 
     result->CreateSampler = WebGPU_CreateSampler;
     result->ReleaseSampler = WebGPU_ReleaseSampler;
+    result->BindFragmentSamplers = WebGPU_BindFragmentSamplers;
 
     result->BindVertexBuffers = WebGPU_BindVertexBuffers;
     result->BindIndexBuffer = WebGPU_BindIndexBuffer;
