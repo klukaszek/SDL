@@ -349,7 +349,7 @@ typedef struct WebGPUCommandBuffer
     // WebGPUComputePipeline *currentComputePipeline;
     WebGPUGraphicsPipeline *currentGraphicsPipeline;
 
-    WebGPUBindGroup* bindGroups;
+    WebGPUBindGroup *bindGroups;
     Uint32 bindGroupCount;
 
     bool resourcesDirty;
@@ -1632,7 +1632,7 @@ static SDL_GPUBuffer *WebGPU_INTERNAL_CreateGPUBuffer(SDL_GPURenderer *driverDat
         SDL_GPUTransferBufferUsage sdlFlags = *((SDL_GPUTransferBufferUsage *)usageFlags);
         if (sdlFlags == SDL_GPU_TRANSFERBUFFERUSAGE_UPLOAD) {
             SDL_Log("Creating upload transfer buffer");
-            wgpuUsage = WGPUBufferUsage_MapWrite | WGPUBufferUsage_CopySrc;
+            wgpuUsage = WGPUBufferUsage_CopyDst | WGPUBufferUsage_CopySrc;
         } else if (sdlFlags == SDL_GPU_TRANSFERBUFFERUSAGE_DOWNLOAD) {
             SDL_Log("Creating download transfer buffer");
             wgpuUsage = WGPUBufferUsage_MapRead | WGPUBufferUsage_CopyDst;
@@ -1747,7 +1747,7 @@ static void WebGPU_ReleaseTransferBuffer(SDL_GPURenderer *driverData, SDL_GPUTra
     SDL_free(webgpuBuffer);
 }
 
-static void WebGPU_INTERNAL_MapTransferBuffer(WGPUBufferMapAsyncStatus status, void *userdata)
+static void WebGPU_INTERNAL_MapDownloadTransferBuffer(WGPUBufferMapAsyncStatus status, void *userdata)
 {
     WebGPUBuffer *buffer = (WebGPUBuffer *)userdata;
 
@@ -1784,41 +1784,65 @@ static void *WebGPU_MapTransferBuffer(
         return NULL;
     }
 
-    const Uint32 TIMEOUT = 1000;
-    Uint32 startTime = SDL_GetTicks();
-
-    // Reset mapped state
-    buffer->isMapped = false;
-    buffer->mappedData = NULL;
-    SDL_SetAtomicInt(&buffer->mappingComplete, 0);
-
-    WGPUMapMode mapMode = buffer->usageFlags == SDL_GPU_TRANSFERBUFFERUSAGE_UPLOAD ? WGPUMapMode_Write : WGPUMapMode_Read;
-
-    SDL_Log("Mapping buffer %p with usage flags %d", buffer->buffer, buffer->usageFlags);
-
-    // Start async mapping
-    wgpuBufferMapAsync(buffer->buffer, mapMode, 0, buffer->size,
-                       WebGPU_INTERNAL_MapTransferBuffer, buffer);
-
-    // Poll for completion
-    while (SDL_GetAtomicInt(&buffer->mappingComplete) != 1) {
-        if (SDL_GetTicks() - startTime > TIMEOUT) {
-            SDL_LogError(SDL_LOG_CATEGORY_GPU, "Failed to map buffer: timeout");
-            return NULL;
-        }
-
-        SDL_Delay(1);
-    }
-
-    if (!buffer->isMapped) {
-        SDL_SetError("Failed to map buffer");
+    if (buffer->usageFlags != SDL_GPU_TRANSFERBUFFERUSAGE_UPLOAD &&
+        buffer->usageFlags != SDL_GPU_TRANSFERBUFFERUSAGE_DOWNLOAD) {
+        SDL_SetError("Invalid transfer buffer usage");
         return NULL;
     }
 
-    if (mapMode == WGPUMapMode_Read) {
-        buffer->mappedData = (void *)wgpuBufferGetConstMappedRange(buffer->buffer, 0, buffer->size);
+    // We can skip the entire async mapping process if we're just uploading data.
+    // Once we unmap, we can just check if the transfer buffer is an upload buffer
+    // and then copy the data over using wgpuQueueWriteBuffer().
+    //
+    // See: https://toji.dev/webgpu-best-practices/buffer-uploads.html
+    if (buffer->usageFlags == SDL_GPU_TRANSFERBUFFERUSAGE_UPLOAD) {
+        // Upload case:
+        if (!buffer->mappedData) {
+            buffer->mappedData = SDL_malloc(buffer->size);
+        } else {
+            buffer->mappedData = SDL_realloc(buffer->mappedData, buffer->size);
+        }
+
+        SDL_SetAtomicInt(&buffer->mappingComplete, 1);
+        buffer->isMapped = true;
     } else {
-        buffer->mappedData = wgpuBufferGetMappedRange(buffer->buffer, 0, buffer->size);
+        // Read back case:
+        // We need to do an async mapping operation to read data from the buffer.
+        const Uint32 TIMEOUT = 1000;
+        Uint32 startTime = SDL_GetTicks();
+
+        // Reset mapped state
+        buffer->isMapped = false;
+        buffer->mappedData = NULL;
+        SDL_SetAtomicInt(&buffer->mappingComplete, 0);
+
+        WGPUMapMode mapMode = buffer->usageFlags == SDL_GPU_TRANSFERBUFFERUSAGE_UPLOAD ? WGPUMapMode_Write : WGPUMapMode_Read;
+
+        SDL_Log("Mapping buffer %p with usage flags %d", buffer->buffer, buffer->usageFlags);
+
+        // Start async mapping for download buffers
+        wgpuBufferMapAsync(buffer->buffer, mapMode, 0, buffer->size,
+                           WebGPU_INTERNAL_MapDownloadTransferBuffer, buffer);
+
+        // Poll for completion
+        while (SDL_GetAtomicInt(&buffer->mappingComplete) != 1) {
+            if (SDL_GetTicks() - startTime > TIMEOUT) {
+                SDL_LogError(SDL_LOG_CATEGORY_GPU, "Failed to map buffer: timeout");
+                return NULL;
+            }
+
+            SDL_Delay(1);
+        }
+
+        if (!buffer->isMapped) {
+            SDL_SetError("Failed to map buffer");
+            return NULL;
+        }
+
+        // We only need GetConstMappedRange for reading
+        if (mapMode == WGPUMapMode_Read) {
+            buffer->mappedData = (void *)wgpuBufferGetConstMappedRange(buffer->buffer, 0, buffer->size);
+        }
     }
 
     return buffer->mappedData;
@@ -1832,9 +1856,16 @@ static void WebGPU_UnmapTransferBuffer(
     WebGPUBuffer *buffer = (WebGPUBuffer *)container->activeBufferHandle->webgpuBuffer;
 
     if (buffer && buffer->buffer) {
-        wgpuBufferUnmap(buffer->buffer);
+
+        // Write the data to the buffer if it's an upload buffer
+        if (buffer->usageFlags == SDL_GPU_TRANSFERBUFFERUSAGE_UPLOAD) {
+            wgpuQueueWriteBuffer(((WebGPURenderer *)driverData)->queue, buffer->buffer, 0, buffer->mappedData, buffer->size);
+        } else {
+            wgpuBufferUnmap(buffer->buffer);
+        }
+
         buffer->isMapped = false;
-        buffer->mappedData = NULL;
+        SDL_free(buffer->mappedData);
         SDL_SetAtomicInt(&buffer->mappingComplete, 0);
     }
 
@@ -2845,8 +2876,7 @@ static void WebGPU_BindFragmentSamplers(SDL_GPUCommandBuffer *commandBuffer,
         SDL_LogError(SDL_LOG_CATEGORY_GPU, "No resource layout set for current graphics pipeline");
         return;
     }
-    if (webgpuCommandBuffer->currentGraphicsPipeline->bindGroups != NULL)
-    {
+    if (webgpuCommandBuffer->currentGraphicsPipeline->bindGroups != NULL) {
         // Early return if the bind groups have already been created
         // We can do this because if the proper bindings do not exist within the bind groups, the renderpass will fail
         // Our BindGroups should be immutable once they are created, so we can skip this step if they already exist
