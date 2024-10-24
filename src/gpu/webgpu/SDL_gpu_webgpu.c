@@ -179,6 +179,7 @@ typedef struct WebGPUBindingInfo
 
 typedef struct WebGPUBindGroupLayout
 {
+    WGPUBindGroupLayout layout;
     uint8_t group;
     WebGPUBindingInfo *bindings;
     uint32_t bindingCount;
@@ -1185,14 +1186,14 @@ static SDL_GPUCommandBuffer *WebGPU_AcquireCommandBuffer(SDL_GPURenderer *driver
 
 static bool WebGPU_Submit(SDL_GPUCommandBuffer *commandBuffer)
 {
-    WebGPUCommandBuffer *webgpuCommandBuffer = (WebGPUCommandBuffer *)commandBuffer;
-    WebGPURenderer *renderer = webgpuCommandBuffer->renderer;
+    WebGPUCommandBuffer *wgpuCmdBuf = (WebGPUCommandBuffer *)commandBuffer;
+    WebGPURenderer *renderer = wgpuCmdBuf->renderer;
 
     WGPUCommandBufferDescriptor commandBufferDesc = {
         .label = "SDL_GPU Command Buffer",
     };
 
-    WGPUCommandBuffer commandHandle = wgpuCommandEncoderFinish(webgpuCommandBuffer->commandEncoder, &commandBufferDesc);
+    WGPUCommandBuffer commandHandle = wgpuCommandEncoderFinish(wgpuCmdBuf->commandEncoder, &commandBufferDesc);
     if (!commandHandle) {
         SDL_LogError(SDL_LOG_CATEGORY_GPU, "Failed to finish command buffer");
         return false;
@@ -1201,17 +1202,17 @@ static bool WebGPU_Submit(SDL_GPUCommandBuffer *commandBuffer)
 
     // Release the actual command buffer followed by the SDL command buffer
     wgpuCommandBufferRelease(commandHandle);
-    wgpuCommandEncoderRelease(webgpuCommandBuffer->commandEncoder);
+    wgpuCommandEncoderRelease(wgpuCmdBuf->commandEncoder);
 
     // Release any bind groups that were created
-    if (webgpuCommandBuffer->bindGroups) {
-        for (Uint32 i = 0; i < webgpuCommandBuffer->bindGroupCount; i += 1) {
-            /*wgpuBindGroupRelease(webgpuCommandBuffer->bindGroups[i].bindGroup);*/
-            SDL_aligned_free(webgpuCommandBuffer->bindGroups[i].entries);
+    if (wgpuCmdBuf->bindGroups) {
+        for (Uint32 i = 0; i < wgpuCmdBuf->bindGroupCount; i += 1) {
+            /*wgpuBindGroupRelease(wgpuCmdBuf->bindGroups[i].bindGroup);*/
+            /*SDL_aligned_free(wgpuCmdBuf->bindGroups[i].entries);*/
         }
-        SDL_free(webgpuCommandBuffer->bindGroups);
+        SDL_free(wgpuCmdBuf->bindGroups);
     }
-    SDL_free(webgpuCommandBuffer);
+    SDL_free(wgpuCmdBuf);
 
     return true;
 }
@@ -1221,18 +1222,12 @@ static void WebGPU_BeginRenderPass(SDL_GPUCommandBuffer *commandBuffer,
                                    Uint32 colorAttachmentCount,
                                    const SDL_GPUDepthStencilTargetInfo *depthStencilAttachmentInfo)
 {
-    WebGPUCommandBuffer *webgpuCommandBuffer = (WebGPUCommandBuffer *)commandBuffer;
+    WebGPUCommandBuffer *wgpuCmdBuf = (WebGPUCommandBuffer *)commandBuffer;
     WebGPUTexture *texture = NULL;
 
     if (colorAttachmentCount == 0) {
         SDL_LogError(SDL_LOG_CATEGORY_GPU, "No color attachments provided for render pass");
         return;
-    }
-
-    /*Uint32 numBindGroups = webgpuCommandBuffer->bindGroupCount;*/
-    WebGPUBindGroup *bindGroups = webgpuCommandBuffer->bindGroups;
-    for (Uint32 i = 0; i < webgpuCommandBuffer->bindGroupCount; i += 1) {
-        webgpuCommandBuffer->currentGraphicsPipeline->bindGroups[i] = bindGroups[i];
     }
 
     // Build WGPU color attachments from the SDL color attachment structs
@@ -1284,23 +1279,25 @@ static void WebGPU_BeginRenderPass(SDL_GPUCommandBuffer *commandBuffer,
     };
 
     // Begin the render pass
-    webgpuCommandBuffer->renderPassEncoder = wgpuCommandEncoderBeginRenderPass(webgpuCommandBuffer->commandEncoder, &renderPassDesc);
+    wgpuCmdBuf->renderPassEncoder = wgpuCommandEncoderBeginRenderPass(wgpuCmdBuf->commandEncoder, &renderPassDesc);
 }
 
 static void WebGPU_EndRenderPass(SDL_GPUCommandBuffer *commandBuffer)
 {
-    WebGPUCommandBuffer *webgpuCommandBuffer = (WebGPUCommandBuffer *)commandBuffer;
-    wgpuRenderPassEncoderEnd(webgpuCommandBuffer->renderPassEncoder);
-    wgpuRenderPassEncoderRelease(webgpuCommandBuffer->renderPassEncoder);
+    WebGPUCommandBuffer *wgpuCmdBuf = (WebGPUCommandBuffer *)commandBuffer;
+
+    // Finish the render pass with all bind groups set
+    wgpuRenderPassEncoderEnd(wgpuCmdBuf->renderPassEncoder);
+    wgpuRenderPassEncoderRelease(wgpuCmdBuf->renderPassEncoder);
 }
 
 static void WebGPU_BeginCopyPass(SDL_GPUCommandBuffer *commandBuffer)
 {
-    WebGPUCommandBuffer *webgpuCommandBuffer = (WebGPUCommandBuffer *)commandBuffer;
+    WebGPUCommandBuffer *wgpuCmdBuf = (WebGPUCommandBuffer *)commandBuffer;
     WGPUCommandEncoderDescriptor commandEncoderDesc = {
         .label = "SDL_GPU Copy Encoder",
     };
-    webgpuCommandBuffer->commandEncoder = wgpuDeviceCreateCommandEncoder(webgpuCommandBuffer->renderer->device, &commandEncoderDesc);
+    wgpuCmdBuf->commandEncoder = wgpuDeviceCreateCommandEncoder(wgpuCmdBuf->renderer->device, &commandEncoderDesc);
 }
 
 static void WebGPU_EndCopyPass(SDL_GPUCommandBuffer *commandBuffer)
@@ -1456,8 +1453,8 @@ static bool WebGPU_AcquireSwapchainTexture(
     Uint32 *ret_width,
     Uint32 *ret_height)
 {
-    WebGPUCommandBuffer *webgpuCommandBuffer = (WebGPUCommandBuffer *)commandBuffer;
-    WebGPURenderer *renderer = webgpuCommandBuffer->renderer;
+    WebGPUCommandBuffer *wgpuCmdBuf = (WebGPUCommandBuffer *)commandBuffer;
+    WebGPURenderer *renderer = wgpuCmdBuf->renderer;
     WindowData *windowData = WebGPU_INTERNAL_FetchWindowData(window);
     WebGPUSwapchainData *swapchainData = windowData->swapchainData;
 
@@ -2409,7 +2406,7 @@ static WebGPUPipelineResourceLayout *WebGPU_INTERNAL_CreatePipelineResourceLayou
                                                                     }
                                                                   : (WGPUBufferBindingLayout){ 0 },
                 .sampler = binding->type == WGPUBindingType_Sampler ? (WGPUSamplerBindingLayout){
-                                                                          .type = WGPUSamplerBindingType_Filtering,
+                                                                          .type = WGPUSamplerBindingType_NonFiltering,
                                                                       }
                                                                     : (WGPUSamplerBindingLayout){ 0 },
                 .texture = binding->type == WGPUBindingType_Texture ? (WGPUTextureBindingLayout){
@@ -2421,8 +2418,9 @@ static WebGPUPipelineResourceLayout *WebGPU_INTERNAL_CreatePipelineResourceLayou
             };
         }
 
+        layout->layout = wgpuDeviceCreateBindGroupLayout(renderer->device, &bindGroupLayoutDesc);
         // Create the bind group layout from the descriptor
-        layouts[i] = wgpuDeviceCreateBindGroupLayout(renderer->device, &bindGroupLayoutDesc);
+        layouts[i] = layout->layout;
     }
 
     // Create the pipeline layout
@@ -2438,8 +2436,8 @@ static WebGPUPipelineResourceLayout *WebGPU_INTERNAL_CreatePipelineResourceLayou
     resourceLayout->pipelineLayout = pipelineLayout;
 
     // Release any allocated memory that is no longer needed
-    SDL_free(pipelineBindings);
-    SDL_free(layouts);
+    /*SDL_free(pipelineBindings);*/
+    /*SDL_free(layouts);*/
 
     return resourceLayout;
 }
@@ -2474,6 +2472,7 @@ static SDL_GPUGraphicsPipeline *WebGPU_CreateGraphicsPipeline(
     // BIG LIMITATION: This means that if you want to change the bindings, you will have to create a new pipeline.
     pipeline->bindGroups = NULL;
     pipeline->bindGroupCount = resourceLayout->bindGroupLayoutCount;
+    SDL_Log("bindGroupCount: %u", pipeline->bindGroupCount);
 
     SDL_Log("Created Resource Layout");
 
@@ -2685,7 +2684,6 @@ static SDL_GPUTexture *WebGPU_CreateTexture(
 
     // Create the texture view
     texture->fullView = wgpuTextureCreateView(texture->texture, &viewDesc);
-    SDL_Log("Created texture view %p", texture->fullView);
     if (texture->fullView == NULL) {
         SDL_LogError(SDL_LOG_CATEGORY_GPU, "Failed to create texture view");
         SDL_free(texture);
@@ -2785,6 +2783,7 @@ static void WebGPU_SetTextureName(
 
     // Set the texture view name
     wgpuTextureViewSetLabel(webgpuTexture->fullView, name);
+    wgpuTextureSetLabel(webgpuTexture->texture, name);
 }
 
 static void WebGPU_UploadToTexture(SDL_GPUCommandBuffer *commandBuffer,
@@ -2807,7 +2806,7 @@ static SDL_GPUSampler *WebGPU_CreateSampler(
     SDL_assert(createinfo && "Sampler create info must not be NULL when creating a sampler");
 
     WebGPURenderer *renderer = (WebGPURenderer *)driverData;
-    WebGPUSampler *sampler = SDL_calloc(1, sizeof(WebGPUSampler));
+    WebGPUSampler *sampler = SDL_malloc(sizeof(WebGPUSampler));
     if (!sampler) {
         SDL_OutOfMemory();
         return NULL;
@@ -2823,7 +2822,8 @@ static SDL_GPUSampler *WebGPU_CreateSampler(
         .mipmapFilter = SDLToWGPUSamplerMipmapMode(createinfo->mipmap_mode),
         .lodMinClamp = createinfo->min_lod,
         .lodMaxClamp = createinfo->max_lod,
-        .compare = SDLToWGPUCompareFunction(createinfo->compare_op),
+        .compare = WGPUCompareFunction_Undefined, /* TODO: Implement compare functions */
+        /*.compare = SDLToWGPUCompareFunction(createinfo->compare_op),*/
         .maxAnisotropy = (uint16_t)createinfo->max_anisotropy,
     };
 
@@ -2867,16 +2867,18 @@ static void WebGPU_BindFragmentSamplers(SDL_GPUCommandBuffer *commandBuffer,
         return;
     }
 
-    WebGPUCommandBuffer *webgpuCommandBuffer = (WebGPUCommandBuffer *)commandBuffer;
-    if (webgpuCommandBuffer->currentGraphicsPipeline == NULL) {
+    WebGPUCommandBuffer *wgpuCmdBuf = (WebGPUCommandBuffer *)commandBuffer;
+    if (wgpuCmdBuf->currentGraphicsPipeline == NULL) {
         SDL_LogError(SDL_LOG_CATEGORY_GPU, "No current graphics pipeline set");
         return;
     }
-    if (webgpuCommandBuffer->currentGraphicsPipeline->resourceLayout == NULL) {
+    if (wgpuCmdBuf->currentGraphicsPipeline->resourceLayout == NULL) {
         SDL_LogError(SDL_LOG_CATEGORY_GPU, "No resource layout set for current graphics pipeline");
         return;
     }
-    if (webgpuCommandBuffer->currentGraphicsPipeline->bindGroups != NULL) {
+
+    WebGPUGraphicsPipeline *pipeline = wgpuCmdBuf->currentGraphicsPipeline;
+    if (pipeline->bindGroups != NULL) {
         // Early return if the bind groups have already been created
         // We can do this because if the proper bindings do not exist within the bind groups, the renderpass will fail
         // Our BindGroups should be immutable once they are created, so we can skip this step if they already exist
@@ -2884,13 +2886,14 @@ static void WebGPU_BindFragmentSamplers(SDL_GPUCommandBuffer *commandBuffer,
     }
 
     // Get our bind group layout from the pipeline resource layout
-    WebGPUPipelineResourceLayout *resourceLayout = webgpuCommandBuffer->currentGraphicsPipeline->resourceLayout;
+    WebGPUPipelineResourceLayout *resourceLayout = wgpuCmdBuf->currentGraphicsPipeline->resourceLayout;
     WebGPUBindGroupLayout *bgLayouts = resourceLayout->bindGroupLayouts;
     Uint32 bgLayoutCount = resourceLayout->bindGroupLayoutCount;
 
+    SDL_Log("Creating Bind Group Entries for Pipeline");
     // Allocate memory for the bind groups in the command buffer
     for (Uint32 i = 0; i < bgLayoutCount; i += 1) {
-        webgpuCommandBuffer->bindGroups[i].entries = SDL_aligned_alloc(alignof(WGPUBindGroupEntry), sizeof(WGPUBindGroupEntry) * resourceLayout->bindGroupLayouts[i].bindingCount);
+        wgpuCmdBuf->bindGroups[i].entries = SDL_aligned_alloc(alignof(WGPUBindGroupEntry), sizeof(WGPUBindGroupEntry) * resourceLayout->bindGroupLayouts[i].bindingCount);
     }
 
     size_t currentSampler = 0;
@@ -2900,20 +2903,6 @@ static void WebGPU_BindFragmentSamplers(SDL_GPUCommandBuffer *commandBuffer,
         SDL_LogError(SDL_LOG_CATEGORY_GPU, "Texture container is NULL");
         return;
     }
-
-    // Create the texture view descriptor
-    WGPUTextureViewDescriptor viewDesc = {
-        .label = "SDL_GPU WebGPU Texture View",
-        .format = container->activeTextureHandle->webgpuTexture->format,
-        .dimension = SDLToWGPUTextureViewDimension(container->header.info.type),
-        .baseMipLevel = 0,
-        .mipLevelCount = container->header.info.num_levels,
-        .baseArrayLayer = 0,
-        .arrayLayerCount = container->header.info.layer_count_or_depth == 0 ? 1 : container->header.info.layer_count_or_depth,
-    };
-
-    // Create the texture view
-    WGPUTextureView textureView = wgpuTextureCreateView(container->activeTextureHandle->webgpuTexture->texture, &viewDesc);
 
     // Iterate over the bind group layouts and identify which sampler we are supposedly binding.
     // SamplerBindings are always passed in order, so #1 in the array is always the first sampler in the bind group.
@@ -2934,18 +2923,25 @@ static void WebGPU_BindFragmentSamplers(SDL_GPUCommandBuffer *commandBuffer,
                     return;
                 }
 
-                // Create the bind group entry
-                WGPUBindGroupEntry entry = {
-                    .binding = layBinding->binding,
-                    .sampler = sampler->sampler,
-                    .textureView = textureView,
-                };
-
                 // Add the bind group entry to the current resources if the binding matches the layout slot
                 if (layBinding->binding == j) {
-                    webgpuCommandBuffer->bindGroups[i].entries[j] = entry;
+                    wgpuCmdBuf->bindGroups[i].entries[j] = (WGPUBindGroupEntry){
+                        .binding = layBinding->binding,
+                        .sampler = sampler->sampler,
+                    };
+                    wgpuCmdBuf->bindGroups[i].entryCount += 1;
                     currentSampler += 1;
-                    break;
+                }
+            } else if (layBinding->type == WGPUBindingType_Texture) {
+                // If the binding is a texture, we need to create a bind group entry for it
+                // Save this entry in the current resources for later use when we build the bind group
+                // Add the bind group entry to the current resources if the binding matches the layout slot
+                if (layBinding->binding == j) {
+                    wgpuCmdBuf->bindGroups[i].entries[j] = (WGPUBindGroupEntry){
+                        .binding = layBinding->binding,
+                        .textureView = container->activeTextureHandle->webgpuTexture->fullView,
+                    };
+                    wgpuCmdBuf->bindGroups[i].entryCount += 1;
                 }
             }
         }
@@ -3017,25 +3013,73 @@ static void WebGPU_BindGraphicsPipeline(
     SDL_GPUCommandBuffer *commandBuffer,
     SDL_GPUGraphicsPipeline *graphicsPipeline)
 {
-    WebGPUCommandBuffer *webgpuCommandBuffer = (WebGPUCommandBuffer *)commandBuffer;
+    WebGPUCommandBuffer *wgpuCmdBuf = (WebGPUCommandBuffer *)commandBuffer;
     WebGPUGraphicsPipeline *pipeline = (WebGPUGraphicsPipeline *)graphicsPipeline;
 
     // When we bind a new pipeline, we need to allocate memory for our bind groups
     uint32_t bindGroupCount = pipeline->resourceLayout->bindGroupLayoutCount;
-    webgpuCommandBuffer->bindGroups = SDL_malloc(sizeof(WebGPUBindGroup) * bindGroupCount);
-    webgpuCommandBuffer->bindGroupCount = bindGroupCount;
+    wgpuCmdBuf->bindGroups = SDL_malloc(sizeof(WebGPUBindGroup) * bindGroupCount);
+    wgpuCmdBuf->bindGroupCount = bindGroupCount;
 
     // Bind the pipeline
-    wgpuRenderPassEncoderSetPipeline(webgpuCommandBuffer->renderPassEncoder, pipeline->pipeline);
+    wgpuRenderPassEncoderSetPipeline(wgpuCmdBuf->renderPassEncoder, pipeline->pipeline);
 
     // Set the current pipeline
-    webgpuCommandBuffer->currentGraphicsPipeline = pipeline;
+    wgpuCmdBuf->currentGraphicsPipeline = pipeline;
 
     // Track the pipeline (you may need to implement this function)
-    WebGPU_INTERNAL_TrackGraphicsPipeline(webgpuCommandBuffer, pipeline);
+    WebGPU_INTERNAL_TrackGraphicsPipeline(wgpuCmdBuf, pipeline);
 
     // Mark resources as clean
-    webgpuCommandBuffer->resourcesDirty = false;
+    wgpuCmdBuf->resourcesDirty = false;
+}
+
+static void WebGPU_INTERNAL_SetBindGroups(SDL_GPUCommandBuffer *commandBuffer)
+{
+    WebGPUCommandBuffer *wgpuCmdBuf = (WebGPUCommandBuffer *)commandBuffer;
+    WebGPUGraphicsPipeline *pipeline = wgpuCmdBuf->currentGraphicsPipeline;
+
+    // If we have a current graphics pipeline, we need to check if we have bind groups to set
+    // If so, we need to set them before we begin the render pass
+    if (pipeline != NULL) {
+        Uint32 numBindGroups = wgpuCmdBuf->bindGroupCount;
+        WebGPUBindGroup *commandBindGroups = wgpuCmdBuf->bindGroups;
+        WebGPUPipelineResourceLayout *resourceLayout = wgpuCmdBuf->currentGraphicsPipeline->resourceLayout;
+
+        if (numBindGroups != 0) {
+
+            // If our pipeline expects bind groups, but we don't have any, copy the bind groups from the command buffer over
+            if (pipeline->bindGroups == NULL) {
+                SDL_Log("Copying bind groups from command buffer to pipeline");
+                pipeline->bindGroups = SDL_malloc(sizeof(WebGPUBindGroup) * numBindGroups);
+                SDL_memcpy(pipeline->bindGroups, commandBindGroups, sizeof(WebGPUBindGroup) * numBindGroups);
+
+                // Iterate over the bind groups and set them on the render pass
+                // If the WGPUBindGroup does not exist, we need to create it so that we can set it on the render pass
+                for (Uint32 i = 0; i < numBindGroups; i += 1) {
+                    SDL_Log("Creating bind group %u", i);
+
+                    for (Uint32 j = 0; j < resourceLayout->bindGroupLayouts[i].bindingCount; j += 1) {
+                        SDL_Log("Bind group %u, entry %u: %d", i, j, pipeline->bindGroups[i].entries[j].binding);
+                    }
+
+                    WGPUBindGroupDescriptor bindGroupDesc = {
+                        .layout = resourceLayout->bindGroupLayouts[i].layout,
+                        .entryCount = pipeline->bindGroups[i].entryCount,
+                        .entries = pipeline->bindGroups[i].entries,
+                    };
+                    pipeline->bindGroups[i].bindGroup = wgpuDeviceCreateBindGroup(wgpuCmdBuf->renderer->device, &bindGroupDesc);
+
+                    SDL_Log("Bind group %p created", pipeline->bindGroups[i].bindGroup);
+                }
+            }
+        }
+
+        for (Uint32 i = 0; i < numBindGroups; i += 1) {
+            Uint32 group = resourceLayout->bindGroupLayouts[i].group;
+            wgpuRenderPassEncoderSetBindGroup(wgpuCmdBuf->renderPassEncoder, group, pipeline->bindGroups[i].bindGroup, 0, 0);
+        }
+    }
 }
 
 static void WebGPU_DrawPrimitives(
@@ -3045,8 +3089,9 @@ static void WebGPU_DrawPrimitives(
     Uint32 firstVertex,
     Uint32 firstInstance)
 {
-    WebGPUCommandBuffer *wgpuCommandBuffer = (WebGPUCommandBuffer *)commandBuffer;
-    wgpuRenderPassEncoderDraw(wgpuCommandBuffer->renderPassEncoder, vertexCount, instanceCount, firstVertex, firstInstance);
+    WebGPUCommandBuffer *wgpuCmdBuf = (WebGPUCommandBuffer *)commandBuffer;
+    WebGPU_INTERNAL_SetBindGroups(commandBuffer);
+    wgpuRenderPassEncoderDraw(wgpuCmdBuf->renderPassEncoder, vertexCount, instanceCount, firstVertex, firstInstance);
 }
 
 static void WebGPU_DrawIndexedPrimitives(
@@ -3057,8 +3102,9 @@ static void WebGPU_DrawIndexedPrimitives(
     Sint32 vertexOffset,
     Uint32 firstInstance)
 {
-    WebGPUCommandBuffer *wgpuCommandBuffer = (WebGPUCommandBuffer *)commandBuffer;
-    wgpuRenderPassEncoderDrawIndexed(wgpuCommandBuffer->renderPassEncoder, numIndices, numInstances, firstIndex, vertexOffset, firstInstance);
+    WebGPUCommandBuffer *wgpuCmdBuf = (WebGPUCommandBuffer *)commandBuffer;
+    WebGPU_INTERNAL_SetBindGroups(commandBuffer);
+    wgpuRenderPassEncoderDrawIndexed(wgpuCmdBuf->renderPassEncoder, numIndices, numInstances, firstIndex, vertexOffset, firstInstance);
 }
 
 static bool WebGPU_PrepareDriver(SDL_VideoDevice *_this)
