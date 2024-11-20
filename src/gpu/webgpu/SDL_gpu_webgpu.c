@@ -524,7 +524,7 @@ static WGPUFilterMode SDLToWGPUFilterMode(SDL_GPUFilter filterMode)
     case SDL_GPU_FILTER_LINEAR:
         return WGPUFilterMode_Linear;
     default:
-        return WGPUFilterMode_Nearest;
+        return WGPUFilterMode_Undefined;
     }
 }
 
@@ -2882,6 +2882,17 @@ static SDL_GPUSampler *WebGPU_CreateSampler(
         SDL_OutOfMemory();
         return NULL;
     }
+
+    /*WGPUSamplerDescriptor samplerDesc = {};*/
+    /*samplerDesc.addressModeU = WGPUAddressMode_Repeat;*/
+    /*samplerDesc.addressModeV = WGPUAddressMode_Repeat;*/
+    /*samplerDesc.magFilter = WGPUFilterMode_Nearest;*/
+    /*samplerDesc.minFilter = WGPUFilterMode_Nearest;*/
+    /*samplerDesc.mipmapFilter = WGPUMipmapFilterMode_Nearest;*/
+    /*samplerDesc.lodMinClamp = 0.0f;*/
+    /*samplerDesc.lodMaxClamp = 1.0f;*/
+    /*samplerDesc.maxAnisotropy = 1;*/
+    /*WGPUSampler pointWrapSampler = wgpuDeviceCreateSampler(renderer->device, &samplerDesc);*/
 
     WGPUSamplerDescriptor samplerDesc = {
         .label = "SDL_GPU WebGPU Sampler",

@@ -2802,6 +2802,27 @@ SDL_GPUFence *SDL_SubmitGPUCommandBufferAndAcquireFence(
         command_buffer);
 }
 
+bool SDL_CancelGPUCommandBuffer(
+    SDL_GPUCommandBuffer *command_buffer)
+{
+    CommandBufferCommonHeader *commandBufferHeader = (CommandBufferCommonHeader *)command_buffer;
+
+    if (command_buffer == NULL) {
+        SDL_InvalidParamError("command_buffer");
+        return false;
+    }
+
+    if (COMMAND_BUFFER_DEVICE->debug_mode) {
+        if (commandBufferHeader->swapchain_texture_acquired) {
+            SDL_assert_release(!"Cannot cancel command buffer after a swapchain texture has been acquired!");
+            return false;
+        }
+    }
+
+    return COMMAND_BUFFER_DEVICE->Cancel(
+        command_buffer);
+}
+
 bool SDL_WaitForGPUIdle(
     SDL_GPUDevice *device)
 {
@@ -2857,4 +2878,17 @@ void SDL_ReleaseGPUFence(
     device->ReleaseFence(
         device->driverData,
         fence);
+}
+
+Uint32 SDL_CalculateGPUTextureFormatSize(
+    SDL_GPUTextureFormat format,
+    Uint32 width,
+    Uint32 height,
+    Uint32 depth_or_layer_count)
+{
+    Uint32 blockWidth = SDL_max(Texture_GetBlockWidth(format), 1);
+    Uint32 blockHeight = SDL_max(Texture_GetBlockHeight(format), 1);
+    Uint32 blocksPerRow = (width + blockWidth - 1) / blockWidth;
+    Uint32 blocksPerColumn = (height + blockHeight - 1) / blockHeight;
+    return depth_or_layer_count * blocksPerRow * blocksPerColumn * SDL_GPUTextureFormatTexelBlockSize(format);
 }
