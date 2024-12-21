@@ -10,6 +10,7 @@
 #include "stdalign.h"
 #include <SDL3/SDL_events.h>
 #include <SDL3/SDL_gpu.h>
+#include <SDL3/SDL_hints.h>
 #include <SDL3/SDL_mutex.h>
 #include <SDL3/SDL_oldnames.h>
 #include <SDL3/SDL_properties.h>
@@ -80,10 +81,10 @@ typedef enum WebGPUBindingType
     WGPUBindingType_Buffer = 0x00000001,
     WGPUBindingType_Sampler = 0x00000002,
     WGPUBindingType_Texture = 0x00000003,
-    /*WGPUBindingType_StorageTexture = 0x00000004,*/
+    WGPUBindingType_StorageTexture = 0x00000004,
     /**/
     /*// Buffer sub-types*/
-    /*WGPUBindingType_UniformBuffer = 0x00000011,*/
+    WGPUBindingType_UniformBuffer = 0x00000011,
     /*WGPUBindingType_StorageBuffer = 0x00000012,*/
     /*WGPUBindingType_ReadOnlyStorageBuffer = 0x00000013,*/
     /**/
@@ -101,6 +102,24 @@ typedef enum WebGPUBindingType
     /*WGPUBindingType_ReadOnlyStorageTexture = 0x00000045,*/
     /*WGPUBindingType_ReadWriteStorageTexture = 0x00000046,*/
 } WebGPUBindingType;
+
+static const char *WebGPU_GetBindingTypeString(WebGPUBindingType type)
+{
+    switch (type) {
+    case WGPUBindingType_Buffer:
+        return "Buffer";
+    case WGPUBindingType_UniformBuffer:
+        return "UniformBuffer";
+    case WGPUBindingType_Sampler:
+        return "Sampler";
+    case WGPUBindingType_Texture:
+        return "Texture";
+    default:
+        return "Undefined";
+    }
+}
+
+
 
 // WebGPU Structures
 // ---------------------------------------------------
@@ -171,8 +190,8 @@ typedef struct WebGPUBufferContainer
 // ---------------------------------------------------
 typedef struct WebGPUBindingInfo
 {
-    uint8_t group;
-    uint16_t binding;
+    unsigned int group;
+    unsigned int binding;
     WebGPUBindingType type;
 } WebGPUBindingInfo;
 
@@ -183,6 +202,13 @@ typedef struct WebGPUBindGroupLayout
     WebGPUBindingInfo *bindings;
     uint32_t bindingCount;
 } WebGPUBindGroupLayout;
+
+
+typedef struct UniformBindingInfo
+{
+    uint8_t group;
+    uint16_t binding;
+} UniformBindingInfo;
 
 typedef struct WebGPUPipelineResourceLayout
 {
@@ -412,12 +438,10 @@ static WebGPUBindingType DetectBindingType(const char *line)
     if (SDL_strstr(line, "buffer") != NULL) {
         return WGPUBindingType_Buffer;
     } else if (SDL_strstr(line, "uniform") != NULL) {
-        return WGPUBindingType_Buffer;
+        return WGPUBindingType_UniformBuffer;
     } else if (SDL_strstr(line, "sampler") != NULL) {
-        SDL_Log("Detected sampler");
         return WGPUBindingType_Sampler;
     } else if (SDL_strstr(line, "texture") != NULL) {
-        SDL_Log("Detected texture");
         return WGPUBindingType_Texture;
     } else {
         return WGPUBindingType_Undefined;
@@ -448,6 +472,7 @@ static WebGPUBindingInfo *ExtractBindingsFromShader(const char *shaderCode, uint
     do {
         // Check if the line matches the pattern
         if (regexec(&regex, line, 3, matches, 0) == 0) {
+            // Expand the array if needed
             if (count >= capacity) {
                 capacity *= 2;
                 bindings = (WebGPUBindingInfo *)realloc(bindings, capacity * sizeof(WebGPUBindingInfo));
@@ -458,13 +483,11 @@ static WebGPUBindingInfo *ExtractBindingsFromShader(const char *shaderCode, uint
             strncpy(groupStr, line + matches[1].rm_so, matches[1].rm_eo - matches[1].rm_so);
             strncpy(bindingStr, line + matches[2].rm_so, matches[2].rm_eo - matches[2].rm_so);
 
+            // Store the group, binding, and type
             bindings[count].group = atoi(groupStr);
             bindings[count].binding = atoi(bindingStr);
             bindings[count].type = DetectBindingType(line);
             count++;
-
-            SDL_Log("%s", line);
-            SDL_Log("Group: %s, Binding: %s", groupStr, bindingStr);
         }
     } while ((line = strtok(NULL, "\n")) != NULL);
 
@@ -1184,8 +1207,6 @@ static bool WebGPU_INTERNAL_OnWindowResize(void *userdata, SDL_Event *event)
         windowData->needsSwapchainRecreate = true;
     }
 
-    SDL_Log("Window resized, recreating swapchain");
-
     return true;
 }
 
@@ -1203,14 +1224,11 @@ static SDL_GPUBuffer *WebGPU_INTERNAL_CreateGPUBuffer(SDL_GPURenderer *driverDat
         // VERIFY ALL OF THESE IF THERE ARE BUGS. I BELIEVE THIS IS CORRECT HOWEVER
         SDL_GPUTransferBufferUsage sdlFlags = *((SDL_GPUTransferBufferUsage *)usageFlags);
         if (sdlFlags == SDL_GPU_TRANSFERBUFFERUSAGE_UPLOAD) {
-            SDL_Log("Creating upload transfer buffer");
             wgpuUsage = WGPUBufferUsage_CopyDst | WGPUBufferUsage_CopySrc;
         } else if (sdlFlags == SDL_GPU_TRANSFERBUFFERUSAGE_DOWNLOAD) {
-            SDL_Log("Creating download transfer buffer");
             wgpuUsage = WGPUBufferUsage_MapRead | WGPUBufferUsage_CopyDst;
         }
     } else {
-        SDL_Log("Creating GPU buffer");
         wgpuUsage = SDLToWGPUBufferUsageFlags(*(SDL_GPUBufferUsageFlags *)usageFlags);
         wgpuUsage |= WGPUBufferUsage_CopyDst | WGPUBufferUsage_CopySrc;
     }
@@ -1218,7 +1236,12 @@ static SDL_GPUBuffer *WebGPU_INTERNAL_CreateGPUBuffer(SDL_GPURenderer *driverDat
     buffer->usageFlags = *((SDL_GPUBufferUsageFlags *)usageFlags);
     SDL_SetAtomicInt(&buffer->mappingComplete, 0);
 
-    SDL_Log("Creating buffer with usage flags: %d", wgpuUsage);
+    if (type == WEBGPU_BUFFER_TYPE_TRANSFER) {
+        SDL_Log("Creating transfer buffer with usage flags: %d", wgpuUsage);
+    } else {
+        SDL_Log("Creating GPU buffer with usage flags: %d", wgpuUsage);
+    }
+
     WGPUBufferDescriptor bufferDesc = {
         .usage = wgpuUsage,
         .size = size,
@@ -1440,8 +1463,8 @@ static void WebGPU_UnmapTransferBuffer(
             wgpuBufferUnmap(buffer->buffer);
         }
 
+        // Unlock the buffer
         buffer->isMapped = false;
-        /*SDL_free(buffer->mappedData);*/
         SDL_SetAtomicInt(&buffer->mappingComplete, 0);
     }
 
@@ -2189,6 +2212,7 @@ static SDL_GPUShader *WebGPU_CreateShader(
         .label = "SDL_GPU WebGPU WGSL Cross-Compiled Shader",
     };
 
+
     // Create a WebGPUShader object to cast to SDL_GPUShader *
     uint32_t entryPointNameLength = SDL_strlen(shaderCreateInfo->entrypoint) + 1;
     shader->wgslSource = SDL_malloc(SDL_strlen(wgsl) + 1);
@@ -2201,7 +2225,9 @@ static SDL_GPUShader *WebGPU_CreateShader(
     shader->storageTextureCount = shaderCreateInfo->num_storage_textures;
     shader->shaderModule = wgpuDeviceCreateShaderModule(renderer->device, &shader_desc);
 
-    SDL_Log("Shader Created Successfully:");
+    const char *stage = shaderCreateInfo->stage == SDL_GPU_SHADERSTAGE_VERTEX ? "Vertex" : "Fragment";
+
+    SDL_Log("Shader Created Successfully: %s", stage);
     SDL_Log("entry: %s\n", shader->entrypoint);
     SDL_Log("sampler count: %u\n", shader->samplerCount);
     SDL_Log("storageBufferCount: %u\n", shader->storageBufferCount);
@@ -2447,7 +2473,8 @@ static WebGPUPipelineResourceLayout *WebGPU_INTERNAL_CreatePipelineResourceLayou
 
     SDL_Log("Building BindGroupLayouts for Pipeline Resource Layout:");
     for (Uint32 i = 0; i < bindingCount; i += 1) {
-        SDL_Log("Binding %d: Group %d, Binding %d, Type %d", i, pipelineBindings[i].group, pipelineBindings[i].binding, pipelineBindings[i].type);
+        const char *type = WebGPU_GetBindingTypeString(pipelineBindings[i].type);
+        SDL_Log("Slot %d: (%d, %d), Type: %s", i, pipelineBindings[i].group, pipelineBindings[i].binding, type);
     }
 
     // Get number of bind groups required for the pipeline
@@ -2899,12 +2926,6 @@ static void WebGPU_ReleaseTexture(
         WebGPUTextureHandle *textureHandle = container->textureHandles[i];
         WebGPUTexture *webgpuTexture = textureHandle->webgpuTexture;
 
-        // Check if any references to the texture exist
-        if (SDL_GetAtomicInt(&webgpuTexture->referenceCount) > 0) {
-            SDL_LogError(SDL_LOG_CATEGORY_GPU, "Cannot destroy texture with active references");
-            return;
-        }
-
         // Release the texture view
         wgpuTextureViewRelease(webgpuTexture->fullView);
 
@@ -3055,12 +3076,6 @@ static void WebGPU_ReleaseSampler(
     SDL_assert(sampler && "Sampler must not be NULL when destroying a sampler");
 
     WebGPUSampler *webgpuSampler = (WebGPUSampler *)sampler;
-
-    // Check if any references to the sampler exist
-    if (SDL_GetAtomicInt(&webgpuSampler->referenceCount) > 0) {
-        SDL_LogError(SDL_LOG_CATEGORY_GPU, "Cannot destroy sampler with active references");
-        return;
-    }
 
     wgpuSamplerRelease(webgpuSampler->sampler);
     SDL_free(webgpuSampler);
@@ -3405,10 +3420,10 @@ static SDL_GPUDevice *WebGPU_CreateDevice(bool debug, bool preferLowPower, SDL_P
     /*// Set our error callback for emscripten*/
     wgpuDeviceSetUncapturedErrorCallback(renderer->device, WebGPU_ErrorCallback, renderer);
 
-    /*emscripten_set_fullscreenchange_callback(EMSCRIPTEN_EVENT_TARGET_WINDOW, NULL, true, emsc_fullscreen_callback);*/
-
     // Acquire the queue from the device
     renderer->queue = wgpuDeviceGetQueue(renderer->device);
+
+    /*SDL_SetHint(SDL_HINT_EMSCRIPTEN_ASYNCIFY, "1");*/
 
     result = (SDL_GPUDevice *)SDL_malloc(sizeof(SDL_GPUDevice));
 
