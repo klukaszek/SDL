@@ -40,14 +40,6 @@
             arr->capacity * sizeof(type));                 \
     }
 
-#define EXPAND_ARRAY_IF_NEEDED(arr, elementType, newCount, capacity, newCapacity) \
-    if (newCount >= capacity) {                                                   \
-        capacity = newCapacity;                                                   \
-        arr = (elementType *)SDL_realloc(                                         \
-            arr,                                                                  \
-            sizeof(elementType) * capacity);                                      \
-    }
-
 #define MOVE_ARRAY_CONTENTS_AND_RESET(i, dstArr, dstCount, srcArr, srcCount) \
     for (i = 0; i < srcCount; i += 1) {                                      \
         dstArr[i] = srcArr[i];                                               \
@@ -187,15 +179,15 @@ typedef struct WebGPUBindingInfo
 typedef struct WebGPUBindGroupLayout
 {
     WGPUBindGroupLayout layout;
-    uint8_t group;
+    Uint8 group;
     WebGPUBindingInfo *bindings;
-    uint32_t bindingCount;
+    Uint32 bindingCount;
 } WebGPUBindGroupLayout;
 
 typedef struct UniformBindingInfo
 {
-    uint8_t group;
-    uint16_t binding;
+    Uint8 group;
+    Uint16 binding;
 } UniformBindingInfo;
 
 typedef struct WebGPUPipelineResourceLayout
@@ -299,6 +291,13 @@ typedef struct WebGPUShader
     SDL_AtomicInt referenceCount;
 } WebGPUShader;
 
+typedef struct WebGPUUniformBuffer
+{
+    WebGPUBuffer *buffer;
+    Uint8 group;
+    Uint8 binding;
+} WebGPUUniformBuffer;
+
 // Graphics Pipeline definitions
 typedef struct WebGPUGraphicsPipeline
 {
@@ -320,17 +319,17 @@ typedef struct WebGPUGraphicsPipeline
 
     bool cycleBindGroups;
 
+    WebGPUUniformBuffer vertexUniformBuffers[MAX_UNIFORM_BUFFERS_PER_STAGE];
+    Uint8 vertexUniformBufferCount;
+
+    WebGPUUniformBuffer fragUniformBuffers[MAX_UNIFORM_BUFFERS_PER_STAGE];
+    Uint8 fragUniformBufferCount;
+
     SDL_AtomicInt referenceCount;
 } WebGPUGraphicsPipeline;
 
 // Renderer Structure
 typedef struct WebGPURenderer WebGPURenderer;
-
-typedef struct WebGPUUniformBuffer
-{
-    WebGPUBuffer *buffer;
-    Uint32 offset;
-} WebGPUUniformBuffer;
 
 // Renderer's command buffer structure
 typedef struct WebGPUCommandBuffer
@@ -352,12 +351,6 @@ typedef struct WebGPUCommandBuffer
 
     WebGPUViewport currentViewport;
     WebGPURect currentScissor;
-
-    WebGPUUniformBuffer vertexUniformBuffers[MAX_UNIFORM_BUFFERS_PER_STAGE];
-    Uint8 vertexUniformBufferCount;
-
-    WebGPUUniformBuffer fragmentUniformBuffers[MAX_UNIFORM_BUFFERS_PER_STAGE];
-    Uint8 fragmentUniformBufferCount;
 
     WebGPUGraphicsPipeline **usedGraphicsPipelines;
     Uint32 usedGraphicsPipelineCount;
@@ -1187,6 +1180,9 @@ static SDL_GPUBuffer *WebGPU_INTERNAL_CreateGPUBuffer(SDL_GPURenderer *driverDat
     } else {
         wgpuUsage = SDLToWGPUBufferUsageFlags(*(SDL_GPUBufferUsageFlags *)usageFlags);
         wgpuUsage |= WGPUBufferUsage_CopyDst | WGPUBufferUsage_CopySrc;
+        if (type == WEBGPU_BUFFER_TYPE_UNIFORM) {
+            wgpuUsage |= WGPUBufferUsage_Uniform;
+        }
     }
 
     buffer->usageFlags = *((SDL_GPUBufferUsageFlags *)usageFlags);
@@ -1285,7 +1281,6 @@ static void WebGPU_INTERNAL_MapDownloadTransferBuffer(WGPUBufferMapAsyncStatus s
         buffer->mappedData = NULL;
         buffer->isMapped = false;
     } else {
-        SDL_Log("Mapped buffer %p to %p", buffer->buffer, buffer->mappedData);
         buffer->isMapped = true;
     }
 
@@ -1370,6 +1365,7 @@ static void *WebGPU_MapTransferBuffer(
         // We only need GetConstMappedRange for reading
         if (mapMode == WGPUMapMode_Read) {
             buffer->mappedData = (void *)wgpuBufferGetConstMappedRange(buffer->buffer, 0, buffer->size);
+            SDL_Log("Mapped buffer %p to %p", buffer->buffer, buffer->mappedData);
         }
     }
 
@@ -1548,9 +1544,6 @@ static void WebGPU_BindVertexBuffers(
             continue;
         }
 
-        webgpuCmdBuffer->vertexUniformBuffers[firstSlot + i].buffer = buffer;
-        webgpuCmdBuffer->vertexUniformBuffers[firstSlot + i].offset = binding->offset;
-
         wgpuRenderPassEncoderSetVertexBuffer(
             webgpuCmdBuffer->renderPassEncoder,
             firstSlot + i,                                     // slot
@@ -1615,8 +1608,6 @@ static void WebGPU_INTERNAL_BindSamplers(SDL_GPUCommandBuffer *commandBuffer,
     // Allocate memory for the bind groups in the command buffer
     for (Uint32 i = 0; i < bgLayoutCount; i += 1) {
         wgpuCmdBuf->bindGroups[i].entries = SDL_aligned_alloc(alignof(WGPUBindGroupEntry), sizeof(WGPUBindGroupEntry) * resourceLayout->bindGroupLayouts[i].bindingCount);
-
-        SDL_Log("Allocated %d bind group entries for bind group %d", resourceLayout->bindGroupLayouts[i].bindingCount, i);
     }
 
     size_t currentSampler = 0;
@@ -1700,13 +1691,97 @@ static void WebGPU_PushVertexUniformData(SDL_GPUCommandBuffer *commandBuffer,
         return;
     }
 
+    WebGPUUniformBuffer uniformBuffer = webgpuCmdBuffer->currentGraphicsPipeline->vertexUniformBuffers[slotIndex];
+
+    Uint32 group = uniformBuffer.group;
+    Uint32 binding = uniformBuffer.binding;
+
+    // Vertex and Uniform buffers are a pain since we have to know where they would be in the bind group.
+    if (!uniformBuffer.buffer) {
+        SDL_GPUBufferUsageFlags usageFlags = SDL_GPU_BUFFERUSAGE_GRAPHICS_STORAGE_READ;
+        // We must create a new buffer for each push. Ensure the buffer is destroyed after the push.
+        WebGPUBuffer *buffer = (WebGPUBuffer *)WebGPU_INTERNAL_CreateGPUBuffer(
+            (SDL_GPURenderer *)webgpuCmdBuffer->renderer,
+            (void *)&usageFlags,
+            length,
+            WEBGPU_BUFFER_TYPE_UNIFORM);
+        WebGPU_SetBufferName((SDL_GPURenderer *)webgpuCmdBuffer->renderer, (SDL_GPUBuffer *)buffer, "Vertex Uniform Buffer");
+
+        uniformBuffer.buffer = buffer;
+
+        webgpuCmdBuffer->currentGraphicsPipeline->vertexUniformBuffers[slotIndex] = uniformBuffer;
+
+        SDL_Log("Created vertex uniform buffer %p of size %d", buffer->buffer, length);
+    } else if (wgpuBufferGetSize(uniformBuffer.buffer->buffer) < length) {
+        // If the buffer is too small, we need to recreate it
+        WebGPU_ReleaseBuffer((SDL_GPURenderer *)webgpuCmdBuffer->renderer, (SDL_GPUBuffer *)uniformBuffer.buffer);
+        SDL_GPUBufferUsageFlags usageFlags = SDL_GPU_BUFFERUSAGE_GRAPHICS_STORAGE_READ;
+        WebGPUBuffer *buffer = (WebGPUBuffer *)WebGPU_INTERNAL_CreateGPUBuffer(
+            (SDL_GPURenderer *)webgpuCmdBuffer->renderer,
+            (void *)&usageFlags,
+            length,
+            WEBGPU_BUFFER_TYPE_UNIFORM);
+        WebGPU_SetBufferName((SDL_GPURenderer *)webgpuCmdBuffer->renderer, (SDL_GPUBuffer *)buffer, "Vertex Uniform Buffer");
+
+        uniformBuffer.buffer = buffer;
+
+        webgpuCmdBuffer->currentGraphicsPipeline->vertexUniformBuffers[slotIndex] = uniformBuffer;
+
+        SDL_Log("Recreated vertex uniform buffer %p", buffer->buffer);
+    }
+
+    /*SDL_Log("Pushing vertex uniform data to buffer %p", uniformBuffer.buffer->buffer);*/
+
     // Copy the data into the uniform buffer
     wgpuQueueWriteBuffer(
         webgpuCmdBuffer->renderer->queue,
-        webgpuCmdBuffer->vertexUniformBuffers[slotIndex].buffer->buffer,
+        uniformBuffer.buffer->buffer,
         0,
         data,
         length);
+
+    /*// Read the data back to verify it was written correctly*/
+    /*WebGPUBuffer *transferBuffer = (WebGPUBuffer *)WebGPU_CreateTransferBuffer(*/
+    /*    (SDL_GPURenderer *)webgpuCmdBuffer->renderer,*/
+    /*    SDL_GPU_TRANSFERBUFFERUSAGE_DOWNLOAD,*/
+    /*    length);*/
+    /**/
+    /*// Copy from the uniform buffer to the transfer buffer*/
+    /*WebGPU_CopyBufferToBuffer(*/
+    /*    commandBuffer,*/
+    /*    &(SDL_GPUBufferLocation){ (SDL_GPUBuffer *)uniformBuffer.buffer, 0 },*/
+    /*    &(SDL_GPUBufferLocation){ (SDL_GPUBuffer *)transferBuffer, 0 },*/
+    /*    length,*/
+    /*    false);*/
+    /**/
+    /*void *mappedData = WebGPU_MapTransferBuffer(*/
+    /*    (SDL_GPURenderer *)webgpuCmdBuffer->renderer,*/
+    /*    (SDL_GPUTransferBuffer *)transferBuffer,*/
+    /*    false);*/
+    /**/
+    /*// Read the data back from the raw pointer*/
+    /*for (Uint32 i = 0; i < length; i += 1) {*/
+    /*    SDL_Log("Vertex uniform data: %f", ((float *)mappedData)[i]);*/
+    /*}*/
+    /**/
+    /*WebGPU_UnmapTransferBuffer(*/
+    /*    (SDL_GPURenderer *)webgpuCmdBuffer->renderer,*/
+    /*    (SDL_GPUTransferBuffer *)transferBuffer);*/
+
+    /*WebGPU_ReleaseTransferBuffer((SDL_GPURenderer *)webgpuCmdBuffer->renderer, (SDL_GPUTransferBuffer *)transferBuffer);*/
+
+    WebGPUBindGroup *bindGroup = &webgpuCmdBuffer->bindGroups[group];
+
+    /*SDL_Log("Pushed %u bytes of vertex uniform data to buffer %p", length, uniformBuffer.buffer->buffer);*/
+
+    // Update the entry information for the bind group.
+    bindGroup->entries[binding] = (WGPUBindGroupEntry){
+        .binding = binding,
+        .buffer = uniformBuffer.buffer->buffer,
+        .size = wgpuBufferGetSize(uniformBuffer.buffer->buffer),
+    };
+
+    /*SDL_Log("Updating bind group entry %d with buffer %p", binding, uniformBuffer.buffer->buffer);*/
 }
 
 static void WebGPU_PushFragmentUniformData(SDL_GPUCommandBuffer *commandBuffer,
@@ -1732,33 +1807,67 @@ static void WebGPU_PushFragmentUniformData(SDL_GPUCommandBuffer *commandBuffer,
         return;
     }
 
+    WebGPUUniformBuffer uniformBuffer = webgpuCmdBuffer->currentGraphicsPipeline->fragUniformBuffers[slotIndex];
+
+    Uint32 group = uniformBuffer.group;
+    Uint32 binding = uniformBuffer.binding;
+
     // Vertex and Uniform buffers are a pain since we have to know where they would be in the bind group.
-    if (!webgpuCmdBuffer->fragmentUniformBuffers[slotIndex].buffer) {
+    if (!uniformBuffer.buffer) {
+        SDL_GPUBufferUsageFlags usageFlags = SDL_GPU_BUFFERUSAGE_GRAPHICS_STORAGE_READ;
         // We must create a new buffer for each push. Ensure the buffer is destroyed after the push.
-        SDL_GPUBufferUsageFlags usage = SDL_GPU_BUFFERUSAGE_GRAPHICS_STORAGE_READ;
         WebGPUBuffer *buffer = (WebGPUBuffer *)WebGPU_INTERNAL_CreateGPUBuffer(
             (SDL_GPURenderer *)webgpuCmdBuffer->renderer,
-            (void *)&usage,
+            (void *)&usageFlags,
             length,
             WEBGPU_BUFFER_TYPE_UNIFORM);
+        WebGPU_SetBufferName((SDL_GPURenderer *)webgpuCmdBuffer->renderer, (SDL_GPUBuffer *)buffer, "Fragment Uniform Buffer");
 
-        webgpuCmdBuffer->fragmentUniformBuffers[slotIndex].buffer = buffer;
-        webgpuCmdBuffer->fragmentUniformBuffers[slotIndex].offset = 0;
+        uniformBuffer.buffer = buffer;
 
-        webgpuCmdBuffer->fragmentUniformBufferCount += 1;
+        webgpuCmdBuffer->currentGraphicsPipeline->fragUniformBuffers[slotIndex] = uniformBuffer;
 
-        SDL_Log("Created fragment uniform buffer %p", buffer->buffer);
+        SDL_Log("Created fragment uniform buffer %p of size %d", buffer->buffer, length);
+    } else if (wgpuBufferGetSize(uniformBuffer.buffer->buffer) < length) {
+        // If the buffer is too small, we need to recreate it
+        WebGPU_ReleaseBuffer((SDL_GPURenderer *)webgpuCmdBuffer->renderer, (SDL_GPUBuffer *)uniformBuffer.buffer);
+        SDL_GPUBufferUsageFlags usageFlags = SDL_GPU_BUFFERUSAGE_GRAPHICS_STORAGE_READ;
+        WebGPUBuffer *buffer = (WebGPUBuffer *)WebGPU_INTERNAL_CreateGPUBuffer(
+            (SDL_GPURenderer *)webgpuCmdBuffer->renderer,
+            (void *)&usageFlags,
+            length,
+            WEBGPU_BUFFER_TYPE_UNIFORM);
+        WebGPU_SetBufferName((SDL_GPURenderer *)webgpuCmdBuffer->renderer, (SDL_GPUBuffer *)buffer, "Fragment Uniform Buffer");
+
+        uniformBuffer.buffer = buffer;
+
+        webgpuCmdBuffer->currentGraphicsPipeline->fragUniformBuffers[slotIndex] = uniformBuffer;
+
+        SDL_Log("Recreated fragment uniform buffer %p", buffer->buffer);
     }
 
-    SDL_Log("Pushing fragment uniform data to buffer %p", webgpuCmdBuffer->fragmentUniformBuffers[slotIndex].buffer->buffer);
+    /*SDL_Log("Pushing fragment uniform data to buffer %p", uniformBuffer.buffer->buffer);*/
 
     // Copy the data into the uniform buffer
     wgpuQueueWriteBuffer(
         webgpuCmdBuffer->renderer->queue,
-        webgpuCmdBuffer->fragmentUniformBuffers[slotIndex].buffer->buffer,
+        uniformBuffer.buffer->buffer,
         0,
         data,
         length);
+
+    WebGPUBindGroup *bindGroup = &webgpuCmdBuffer->bindGroups[group];
+
+    /*SDL_Log("Pushed %u bytes of fragment uniform data to buffer %p", length, uniformBuffer.buffer->buffer);*/
+
+    // Update the entry information for the bind group.
+    bindGroup->entries[binding] = (WGPUBindGroupEntry){
+        .binding = binding,
+        .buffer = uniformBuffer.buffer->buffer,
+        .size = wgpuBufferGetSize(uniformBuffer.buffer->buffer),
+    };
+
+    /*SDL_Log("Updating bind group entry %d with buffer %p", binding, uniformBuffer.buffer->buffer);*/
 }
 
 static void WebGPU_BindIndexBuffer(SDL_GPUCommandBuffer *commandBuffer,
@@ -1846,14 +1955,13 @@ static bool WebGPU_Submit(SDL_GPUCommandBuffer *commandBuffer)
         SDL_free(wgpuCmdBuf->bindGroups);
     }
 
-    // Iterate through vertex and fragment uniform buffers and free them
-    // TODO: I implemented this with no thought whatsoever. This sucks. Plan a better way to do this.
-    for (Uint32 i = 0; i < wgpuCmdBuf->vertexUniformBufferCount; i += 1) {
-        WebGPU_ReleaseBuffer((SDL_GPURenderer *)&renderer, (SDL_GPUBuffer *)wgpuCmdBuf->vertexUniformBuffers[i].buffer);
-    }
-    for (Uint32 i = 0; i < wgpuCmdBuf->fragmentUniformBufferCount; i += 1) {
-        WebGPU_ReleaseBuffer((SDL_GPURenderer *)&renderer, (SDL_GPUBuffer *)wgpuCmdBuf->fragmentUniformBuffers[i].buffer);
-    }
+    /*// Iterate through vertex and fragment uniform buffers and free them*/
+    /*for (Uint32 i = 0; i < wgpuCmdBuf->currentGraphicsPipeline->vertexUniformBufferCount; i += 1) {*/
+    /*    WebGPU_ReleaseBuffer((SDL_GPURenderer *)&renderer, (SDL_GPUBuffer *)wgpuCmdBuf->currentGraphicsPipeline->vertexUniformBuffers[i].buffer);*/
+    /*}*/
+    /*for (Uint32 i = 0; i < wgpuCmdBuf->currentGraphicsPipeline->fragUniformBufferCount; i += 1) {*/
+    /*    WebGPU_ReleaseBuffer((SDL_GPURenderer *)&renderer, (SDL_GPUBuffer *)wgpuCmdBuf->currentGraphicsPipeline->fragUniformBuffers[i].buffer);*/
+    /*}*/
 
     // Release the memory for the command buffer
     SDL_free(wgpuCmdBuf);
@@ -2658,7 +2766,7 @@ static WebGPUPipelineResourceLayout *WebGPU_INTERNAL_CreatePipelineResourceLayou
             WebGPUBindingInfo *binding = &layout->bindings[j];
             layoutEntries[j].binding = binding->binding;
 
-            SDL_Log("Binding %d: (%d, %d), Type: %s", j, binding->group, binding->binding, WebGPU_GetBindingTypeString(binding->type));
+            SDL_Log("Binding: (%d, %d), Type: %s", binding->group, binding->binding, WebGPU_GetBindingTypeString(binding->type));
 
             WGPUShaderStage stage = WGPUShaderStage_None;
             if (binding->stage & WEBGPU_SHADER_STAGE_VERTEX) {
@@ -2763,7 +2871,6 @@ static SDL_GPUGraphicsPipeline *WebGPU_CreateGraphicsPipeline(
     }
 
     pipeline->bindGroupCount = resourceLayout->bindGroupLayoutCount;
-    SDL_Log("bindGroupCount: %u", pipeline->bindGroupCount);
 
     // Used to determine when to cycle the bind groups if any of the bindings have changed
     pipeline->bindSamplerHash = 0;
@@ -2773,8 +2880,6 @@ static SDL_GPUGraphicsPipeline *WebGPU_CreateGraphicsPipeline(
 
     // set to true for the first frame to ensure bind groups are created
     pipeline->cycleBindGroups = true;
-
-    SDL_Log("Created Resource Layout");
 
     WebGPUShader *vertShader = (WebGPUShader *)pipelineCreateInfo->vertex_shader;
     WebGPUShader *fragShader = (WebGPUShader *)pipelineCreateInfo->fragment_shader;
@@ -2924,9 +3029,17 @@ static void WebGPU_ReleaseGraphicsPipeline(SDL_GPURenderer *driverData,
         SDL_LogError(SDL_LOG_CATEGORY_GPU, "Releasing a graphics pipeline with active references!");
     }
 
+    for (Uint32 i = 0; i < pipeline->vertexUniformBufferCount; i += 1) {
+        WebGPU_ReleaseBuffer(driverData, (SDL_GPUBuffer*)pipeline->vertexUniformBuffers[i].buffer);
+    }
+
+    for (Uint32 i = 0; i < pipeline->fragUniformBufferCount; i += 1) {
+        WebGPU_ReleaseBuffer(driverData, (SDL_GPUBuffer*)pipeline->fragUniformBuffers[i].buffer);
+    }
+
     if (pipeline->pipeline) {
-        wgpuRenderPipelineRelease(pipeline->pipeline);
         wgpuPipelineLayoutRelease(pipeline->resourceLayout->pipelineLayout);
+        wgpuRenderPipelineRelease(pipeline->pipeline);
     }
 }
 
@@ -2999,7 +3112,8 @@ static SDL_GPUTexture *WebGPU_CreateTexture(
 
     texture->debugName = NULL;
 
-    SDL_Log("Created texture %p", texture);
+    SDL_Log("Created texture %p", texture->texture);
+    SDL_Log("Created texture view %p, for texture %p", texture->fullView, texture->texture);
     return (SDL_GPUTexture *)texture;
 }
 
@@ -3223,7 +3337,7 @@ static SDL_GPUSampler *WebGPU_CreateSampler(
         .lodMinClamp = createinfo->min_lod,
         .lodMaxClamp = createinfo->max_lod,
         .compare = SDLToWGPUCompareFunction(createinfo->compare_op),
-        .maxAnisotropy = (uint16_t)createinfo->max_anisotropy,
+        .maxAnisotropy = (Uint16)createinfo->max_anisotropy,
     };
 
     WGPUSampler wgpuSampler = wgpuDeviceCreateSampler(renderer->device, &samplerDesc);
@@ -3328,6 +3442,9 @@ static void WebGPU_BindGraphicsPipeline(
     WebGPUCommandBuffer *wgpuCmdBuf = (WebGPUCommandBuffer *)commandBuffer;
     WebGPUGraphicsPipeline *pipeline = (WebGPUGraphicsPipeline *)graphicsPipeline;
 
+    // Set the current pipeline
+    wgpuCmdBuf->currentGraphicsPipeline = pipeline;
+
     // When we bind a new pipeline, we need to allocate memory for our bind groups
     uint32_t bindGroupCount = pipeline->resourceLayout->bindGroupLayoutCount;
     wgpuCmdBuf->bindGroups = SDL_malloc(sizeof(WebGPUBindGroup) * bindGroupCount);
@@ -3337,32 +3454,27 @@ static void WebGPU_BindGraphicsPipeline(
     // Assign them in order to wgpuCmdBuf->bindGroups[i].entries[j] where i is the bind group index
     // and j is the binding index.
 
-    uint32_t fragmentUniformBufferCount = 0;
+    uint32_t fragUniformBufferCount = 0;
     uint32_t vertexUniformBufferCount = 0;
 
     // Count uniform buffers for vertex and fragment shaders
     for (int i = 0; i < bindGroupCount; i += 1) {
         WebGPUBindGroupLayout *layout = &pipeline->resourceLayout->bindGroupLayouts[i];
-
-        wgpuCmdBuf->bindGroups[i].entries = SDL_aligned_alloc(alignof(WGPUBindGroupEntry), sizeof(WGPUBindGroupEntry) * layout->bindingCount);
-
+        WebGPUBindGroup *bindGroup = &wgpuCmdBuf->bindGroups[i];
+        // Allocate memory for the bind group entries that will be set when uniforms are pushed
+        bindGroup->entries = SDL_aligned_alloc(alignof(WGPUBindGroupEntry), sizeof(WGPUBindGroupEntry) * layout->bindingCount);
         for (int j = 0; j < layout->bindingCount; j += 1) {
-            if (layout->bindings->type == WGPUBindingType_UniformBuffer) {
-                if (layout->bindings->stage == WEBGPU_SHADER_STAGE_FRAGMENT) {
-                    WebGPUUniformBuffer *fragmentUniformBuffer = &wgpuCmdBuf->fragmentUniformBuffers[fragmentUniformBufferCount];
-                    SDL_Log("Fragment Uniform Buffer %u", fragmentUniformBufferCount);
-                    wgpuCmdBuf->bindGroups[i].entries[j] = (WGPUBindGroupEntry){
-                        .binding = layout->bindings->binding,
-                        .buffer = fragmentUniformBuffer->buffer->buffer,
-                    };
-                    fragmentUniformBufferCount += 1;
-                } else if (layout->bindings->stage == WEBGPU_SHADER_STAGE_VERTEX) {
-                    SDL_Log("Vertex Uniform Buffer %u", vertexUniformBufferCount);
-                    WebGPUUniformBuffer *vertexUniformBuffer = &wgpuCmdBuf->vertexUniformBuffers[vertexUniformBufferCount];
-                    wgpuCmdBuf->bindGroups[i].entries[j] = (WGPUBindGroupEntry){
-                        .binding = layout->bindings->binding,
-                        .buffer = vertexUniformBuffer->buffer->buffer,
-                    };
+            WebGPUBindingInfo *binding = &layout->bindings[j];
+            if (binding->type == WGPUBindingType_UniformBuffer) {
+                if (binding->stage == WEBGPU_SHADER_STAGE_FRAGMENT) {
+                    WebGPUUniformBuffer *fragUniformBuffer = &wgpuCmdBuf->currentGraphicsPipeline->fragUniformBuffers[fragUniformBufferCount];
+                    fragUniformBuffer->group = binding->group;
+                    fragUniformBuffer->binding = binding->binding;
+                    fragUniformBufferCount += 1;
+                } else if (binding->stage == WEBGPU_SHADER_STAGE_VERTEX) {
+                    WebGPUUniformBuffer *vertexUniformBuffer = &wgpuCmdBuf->currentGraphicsPipeline->vertexUniformBuffers[vertexUniformBufferCount];
+                    vertexUniformBuffer->group = binding->group;
+                    vertexUniformBuffer->binding = binding->binding;
                     vertexUniformBufferCount += 1;
                 }
             }
@@ -3370,17 +3482,11 @@ static void WebGPU_BindGraphicsPipeline(
     }
 
     // Set the uniform buffer counts
-    wgpuCmdBuf->vertexUniformBufferCount = vertexUniformBufferCount;
-    wgpuCmdBuf->fragmentUniformBufferCount = fragmentUniformBufferCount;
+    wgpuCmdBuf->currentGraphicsPipeline->vertexUniformBufferCount = vertexUniformBufferCount;
+    wgpuCmdBuf->currentGraphicsPipeline->fragUniformBufferCount = fragUniformBufferCount;
 
     // Bind the pipeline
     wgpuRenderPassEncoderSetPipeline(wgpuCmdBuf->renderPassEncoder, pipeline->pipeline);
-
-    // Set the current pipeline
-    wgpuCmdBuf->currentGraphicsPipeline = pipeline;
-
-    // Track the pipeline (you may need to implement this function)
-    /*WebGPU_INTERNAL_TrackGraphicsPipeline(wgpuCmdBuf, pipeline);*/
 
     // Mark resources as clean
     wgpuCmdBuf->resourcesDirty = false;
