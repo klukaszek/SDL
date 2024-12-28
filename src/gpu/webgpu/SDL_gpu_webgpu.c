@@ -181,7 +181,7 @@ typedef struct WebGPUBindGroupLayout
     WGPUBindGroupLayout layout;
     Uint8 group;
     WebGPUBindingInfo *bindings;
-    Uint32 bindingCount;
+    size_t bindingCount;
 } WebGPUBindGroupLayout;
 
 typedef struct UniformBindingInfo
@@ -204,7 +204,7 @@ typedef struct WebGPUBindGroup
 {
     WGPUBindGroup bindGroup;
     WGPUBindGroupEntry *entries;
-    uint32_t entryCount;
+    size_t entryCount;
     bool cycleBindings;
 } WebGPUBindGroup;
 
@@ -435,8 +435,6 @@ static WebGPUBindingInfo *ExtractBindingsFromShader(const char *shaderCode, uint
             bindings[count].type = DetectBindingType(line);
             bindings[count].stage = stage;
             count++;
-
-            SDL_Log("SDL_GPU: Found binding: group=%d, binding=%d, type=%s", bindings[count - 1].group, bindings[count - 1].binding, WebGPU_GetBindingTypeString(bindings[count - 1].type));
         }
     } while ((line = strtok(NULL, "\n")) != NULL);
 
@@ -694,30 +692,28 @@ static WGPUTextureFormat SDLToWGPUTextureFormat(SDL_GPUTextureFormat sdlFormat)
 
 static WGPUTextureUsageFlags SDLToWGPUTextureUsageFlags(SDL_GPUTextureUsageFlags usageFlags)
 {
-    WGPUTextureUsageFlags wgpuFlags;
-    switch (usageFlags) {
-    case SDL_GPU_TEXTUREUSAGE_SAMPLER:
-        wgpuFlags = WGPUTextureUsage_TextureBinding | WGPUTextureUsage_CopyDst;
-        break;
-    case SDL_GPU_TEXTUREUSAGE_COLOR_TARGET:
-    case SDL_GPU_TEXTUREUSAGE_DEPTH_STENCIL_TARGET:
-        wgpuFlags = WGPUTextureUsage_RenderAttachment;
-        break;
-    case SDL_GPU_TEXTUREUSAGE_GRAPHICS_STORAGE_READ:
-        wgpuFlags = WGPUTextureUsage_StorageBinding;
-        break;
-    case SDL_GPU_TEXTUREUSAGE_COMPUTE_STORAGE_READ:
-        wgpuFlags = WGPUTextureUsage_StorageBinding | WGPUTextureUsage_CopySrc;
-        break;
-    case SDL_GPU_TEXTUREUSAGE_COMPUTE_STORAGE_WRITE:
-        wgpuFlags = WGPUTextureUsage_StorageBinding | WGPUTextureUsage_CopyDst;
-        break;
-    case SDL_GPU_TEXTUREUSAGE_COMPUTE_STORAGE_SIMULTANEOUS_READ_WRITE:
-        wgpuFlags = WGPUTextureUsage_StorageBinding | WGPUTextureUsage_CopySrc | WGPUTextureUsage_CopyDst;
-        break;
-    default:
-        wgpuFlags = WGPUTextureUsage_None;
-        break;
+    WGPUTextureUsageFlags wgpuFlags = WGPUTextureUsage_None;
+
+    if (usageFlags & SDL_GPU_TEXTUREUSAGE_SAMPLER) {
+        wgpuFlags |= WGPUTextureUsage_TextureBinding | WGPUTextureUsage_CopyDst;
+    }
+    if (usageFlags & SDL_GPU_TEXTUREUSAGE_COLOR_TARGET) {
+        wgpuFlags |= WGPUTextureUsage_RenderAttachment;
+    }
+    if (usageFlags & SDL_GPU_TEXTUREUSAGE_DEPTH_STENCIL_TARGET) {
+        wgpuFlags |= WGPUTextureUsage_RenderAttachment;
+    }
+    if (usageFlags & SDL_GPU_TEXTUREUSAGE_GRAPHICS_STORAGE_READ) {
+        wgpuFlags |= WGPUTextureUsage_StorageBinding;
+    }
+    if (usageFlags & SDL_GPU_TEXTUREUSAGE_COMPUTE_STORAGE_READ) {
+        wgpuFlags |= WGPUTextureUsage_StorageBinding | WGPUTextureUsage_CopySrc;
+    }
+    if (usageFlags & SDL_GPU_TEXTUREUSAGE_COMPUTE_STORAGE_WRITE) {
+        wgpuFlags |= WGPUTextureUsage_StorageBinding | WGPUTextureUsage_CopyDst;
+    }
+    if (usageFlags & SDL_GPU_TEXTUREUSAGE_COMPUTE_STORAGE_SIMULTANEOUS_READ_WRITE) {
+        wgpuFlags |= WGPUTextureUsage_StorageBinding | WGPUTextureUsage_CopySrc | WGPUTextureUsage_CopyDst;
     }
 
     return wgpuFlags;
@@ -1948,20 +1944,20 @@ static bool WebGPU_Submit(SDL_GPUCommandBuffer *commandBuffer)
 
     // Release any bind groups that were created
     if (wgpuCmdBuf->bindGroups) {
+
+        for (size_t i = 0; i < wgpuCmdBuf->bindGroupCount; i += 1) {
+            /*SDL_Log("BindGroup: %zu, Entries: %zu", i, wgpuCmdBuf->bindGroups[i].entryCount);*/
+            for (size_t j = 0; j < wgpuCmdBuf->bindGroups[i].entryCount; j += 1) {
+                /*SDL_Log("\tEntry %zu: Binding %d", j, wgpuCmdBuf->bindGroups[i].entries[j].binding);*/
+            }
+        }
+
         for (Uint32 i = 0; i < wgpuCmdBuf->bindGroupCount; i += 1) {
             // We don't free the BindGroup as it is owned by the pipeline and not the cmdBuffer
             SDL_aligned_free(wgpuCmdBuf->bindGroups[i].entries);
         }
         SDL_free(wgpuCmdBuf->bindGroups);
     }
-
-    /*// Iterate through vertex and fragment uniform buffers and free them*/
-    /*for (Uint32 i = 0; i < wgpuCmdBuf->currentGraphicsPipeline->vertexUniformBufferCount; i += 1) {*/
-    /*    WebGPU_ReleaseBuffer((SDL_GPURenderer *)&renderer, (SDL_GPUBuffer *)wgpuCmdBuf->currentGraphicsPipeline->vertexUniformBuffers[i].buffer);*/
-    /*}*/
-    /*for (Uint32 i = 0; i < wgpuCmdBuf->currentGraphicsPipeline->fragUniformBufferCount; i += 1) {*/
-    /*    WebGPU_ReleaseBuffer((SDL_GPURenderer *)&renderer, (SDL_GPUBuffer *)wgpuCmdBuf->currentGraphicsPipeline->fragUniformBuffers[i].buffer);*/
-    /*}*/
 
     // Release the memory for the command buffer
     SDL_free(wgpuCmdBuf);
@@ -2322,12 +2318,15 @@ static bool WebGPU_SupportsTextureFormat(SDL_GPURenderer *driverData,
 
     // Verify that the format, usage, and dimension are considered valid
     if (wgpuFormat == WGPUTextureFormat_Undefined) {
+        SDL_Log("Hi from Undefined Format!");
         return false;
     }
     if (wgpuUsage == WGPUTextureUsage_None) {
+        SDL_Log("Hi from None!");
         return false;
     }
     if (dimension == WGPUTextureDimension_Undefined) {
+        SDL_Log("Hi from Undefined Dimension!");
         return false;
     }
 
@@ -2596,9 +2595,6 @@ static WebGPUBindingInfo *WebGPU_INTERNAL_GraphicsPipelineBindingInfo(WebGPUBind
     WebGPUBindingInfo *pipelineBindings = SDL_malloc(sizeof(WebGPUBindingInfo) * (countA + countB));
     Uint32 combinedCount = 0;
 
-    SDL_Log("Binding Count A: %d", countA);
-    SDL_Log("Binding Count B: %d", countB);
-
     if (bindingsA == NULL && bindingsB == NULL) {
         *retCount = 0;
         return NULL;
@@ -2632,8 +2628,6 @@ static WebGPUBindingInfo *WebGPU_INTERNAL_GraphicsPipelineBindingInfo(WebGPUBind
             combinedCount += 1;
         }
     }
-
-    SDL_Log("Combined Binding Count: %d", combinedCount);
 
     *retCount = combinedCount;
     return pipelineBindings;
@@ -2684,12 +2678,6 @@ static WebGPUPipelineResourceLayout *WebGPU_INTERNAL_CreatePipelineResourceLayou
         // Therefore, we can free the binding information
         SDL_free(vertBindingInfo);
         SDL_free(fragBindingInfo);
-    }
-
-    SDL_Log("Building BindGroupLayouts for Pipeline Resource Layout:");
-    for (Uint32 i = 0; i < bindingCount; i += 1) {
-        const char *type = WebGPU_GetBindingTypeString(pipelineBindings[i].type);
-        SDL_Log("Slot %d: (%d, %d), Type: %s", i, pipelineBindings[i].group, pipelineBindings[i].binding, type);
     }
 
     // Get number of bind groups required for the pipeline
@@ -3030,11 +3018,11 @@ static void WebGPU_ReleaseGraphicsPipeline(SDL_GPURenderer *driverData,
     }
 
     for (Uint32 i = 0; i < pipeline->vertexUniformBufferCount; i += 1) {
-        WebGPU_ReleaseBuffer(driverData, (SDL_GPUBuffer*)pipeline->vertexUniformBuffers[i].buffer);
+        WebGPU_ReleaseBuffer(driverData, (SDL_GPUBuffer *)pipeline->vertexUniformBuffers[i].buffer);
     }
 
     for (Uint32 i = 0; i < pipeline->fragUniformBufferCount; i += 1) {
-        WebGPU_ReleaseBuffer(driverData, (SDL_GPUBuffer*)pipeline->fragUniformBuffers[i].buffer);
+        WebGPU_ReleaseBuffer(driverData, (SDL_GPUBuffer *)pipeline->fragUniformBuffers[i].buffer);
     }
 
     if (pipeline->pipeline) {
@@ -3447,7 +3435,22 @@ static void WebGPU_BindGraphicsPipeline(
 
     // When we bind a new pipeline, we need to allocate memory for our bind groups
     uint32_t bindGroupCount = pipeline->resourceLayout->bindGroupLayoutCount;
+
+    // If a new pipeline is bound, eliminate the old bind groups and create new ones
+    if (wgpuCmdBuf->bindGroups != NULL) {
+        // Release the bind groups and free the entries
+        for (Uint32 i = 0; i < wgpuCmdBuf->bindGroupCount; i += 1) {
+            SDL_aligned_free(wgpuCmdBuf->bindGroups[i].entries);
+        }
+
+        SDL_free(wgpuCmdBuf->bindGroups);
+    }
+
+    // Allocate memory for the bind groups
     wgpuCmdBuf->bindGroups = SDL_malloc(sizeof(WebGPUBindGroup) * bindGroupCount);
+
+    // Copy the pre-constructed bind groups from the pipeline to the command buffer
+    SDL_memcpy(wgpuCmdBuf->bindGroups, pipeline->bindGroups, sizeof(WebGPUBindGroup) * bindGroupCount);
     wgpuCmdBuf->bindGroupCount = bindGroupCount;
 
     // Analyze pipeline bindings and find any number of uniform buffers that need to be set.
@@ -3524,7 +3527,7 @@ static void WebGPU_INTERNAL_SetBindGroups(SDL_GPUCommandBuffer *commandBuffer)
 
                     /*wgpuBindGroupRelease(pipeline->bindGroups[i].bindGroup);*/
                     /*SDL_aligned_free(pipeline->bindGroups[i].entries);*/
-                    /*pipeline->bindGroups[i].entryCount = 0;*/
+                    pipeline->bindGroups[i].entryCount = 0;
                 }
 
                 // Copy the bind group over to the pipeline so we don't have to recreate it every frame
@@ -3536,9 +3539,11 @@ static void WebGPU_INTERNAL_SetBindGroups(SDL_GPUCommandBuffer *commandBuffer)
                     .entries = pipeline->bindGroups[i].entries,
                 };
 
+                pipeline->bindGroups[i].entryCount = bindGroupDesc.entryCount;
                 // Assign the bind group to the pipeline so that we can reuse it without recreating it.
                 pipeline->bindGroups[i].bindGroup = wgpuDeviceCreateBindGroup(wgpuCmdBuf->renderer->device, &bindGroupDesc);
-                pipeline->bindGroups[i].entryCount = resourceLayout->bindGroupLayouts[i].bindingCount;
+
+                SDL_Log("Created bind group %u, expecting %zu entries", i, pipeline->bindGroups[i].entryCount);
             }
 
             // Reset the cycle flag
