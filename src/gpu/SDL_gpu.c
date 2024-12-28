@@ -2519,6 +2519,7 @@ void SDL_BlitGPUTexture(
             failed = true;
         }
         if (info->source.w == 0 || info->source.h == 0 || info->destination.w == 0 || info->destination.h == 0) {
+            SDL_Log("%d %d %d %d", info->source.w, info->source.h, info->destination.w, info->destination.h);
             SDL_assert_release(!"Blit source/destination regions must have non-zero width, height, and depth");
             failed = true;
         }
@@ -2638,8 +2639,7 @@ bool SDL_SetGPUAllowedFramesInFlight(
     CHECK_DEVICE_MAGIC(device, false);
 
     if (device->debug_mode) {
-        if (allowed_frames_in_flight < 1 || allowed_frames_in_flight > 3)
-        {
+        if (allowed_frames_in_flight < 1 || allowed_frames_in_flight > 3) {
             SDL_assert_release(!"allowed_frames_in_flight value must be between 1 and 3!");
         }
     }
@@ -2741,7 +2741,7 @@ bool SDL_WaitAndAcquireGPUSwapchainTexture(
         swapchain_texture_width,
         swapchain_texture_height);
 
-    if (*swapchain_texture != NULL){
+    if (*swapchain_texture != NULL) {
         commandBufferHeader->swapchain_texture_acquired = true;
     }
 
