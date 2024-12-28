@@ -878,9 +878,11 @@ static Uint32 SDLToWGPUSampleCount(SDL_GPUSampleCount samples)
     case SDL_GPU_SAMPLECOUNT_1:
         return 1;
     case SDL_GPU_SAMPLECOUNT_2:
+        return 2;
     case SDL_GPU_SAMPLECOUNT_4:
-    case SDL_GPU_SAMPLECOUNT_8:
         return 4;
+    case SDL_GPU_SAMPLECOUNT_8:
+        return 8;
     default:
         return 1;
     }
@@ -2199,6 +2201,7 @@ static void WebGPU_CreateSwapchain(WebGPURenderer *renderer, WindowData *windowD
             .format = swapchainData->format,
             .mipLevelCount = 1,
             .sampleCount = swapchainData->sampleCount,
+            .label = "CanvasMSAA",
         };
         swapchainData->msaaTexture = wgpuDeviceCreateTexture(renderer->device, &msaaDesc);
         swapchainData->msaaView = wgpuTextureCreateView(swapchainData->msaaTexture, NULL);
@@ -2366,6 +2369,82 @@ static bool WebGPU_SupportsTextureFormat(SDL_GPURenderer *driverData,
     }
 
     // Texture format is valid.
+    return true;
+}
+
+static bool WebGPU_SupportsSampleCount(SDL_GPURenderer *driverData,
+                                       SDL_GPUTextureFormat format,
+                                       SDL_GPUSampleCount desiredSampleCount)
+{
+    (void)driverData;
+    WGPUTextureFormat wgpuFormat = SDLToWGPUTextureFormat(format);
+    Uint32 wgpuSampleCount = SDLToWGPUSampleCount(desiredSampleCount);
+
+    // Verify that the format and sample count are considered valid
+    if (wgpuFormat == WGPUTextureFormat_Undefined) {
+        return false;
+    }
+
+    // WebGPU only supports 1 and 4.
+    if (wgpuSampleCount != 1 && wgpuSampleCount != 4) {
+        return false;
+    }
+
+    // Sample count is valid.
+    return true;
+}
+
+static bool WebGPU_SupportsPresentMode(SDL_GPURenderer *driverData,
+                                       SDL_Window *window,
+                                       SDL_GPUPresentMode presentMode)
+{
+    (void)driverData;
+    (void)window;
+    WGPUPresentMode wgpuPresentMode = SDLToWGPUPresentMode(presentMode);
+
+    // WebGPU only supports these present modes
+    if (wgpuPresentMode != WGPUPresentMode_Fifo &&
+        wgpuPresentMode != WGPUPresentMode_Mailbox &&
+        wgpuPresentMode != WGPUPresentMode_Immediate) {
+        return false;
+    }
+
+    // Present mode is valid.
+    return true;
+}
+
+static bool WebGPU_SupportsSwapchainComposition(SDL_GPURenderer *driverData,
+                                                SDL_Window *window,
+                                                SDL_GPUSwapchainComposition swapchainComposition)
+{
+    (void)driverData;
+    (void)window;
+
+    // We *should* only support SDR for now, but HDR support has been added through canvas tonemapping
+    // see: https://developer.chrome.com/blog/new-in-webgpu-129
+    if (swapchainComposition != SDL_GPU_SWAPCHAINCOMPOSITION_SDR && swapchainComposition != SDL_GPU_SWAPCHAINCOMPOSITION_HDR_EXTENDED_LINEAR) {
+        return false;
+    }
+
+    // Swapchain composition is valid.
+    return true;
+}
+
+static bool WebGPU_SetSwapchainParameters(SDL_GPURenderer *driverData,
+                                          SDL_Window *window,
+                                          SDL_GPUSwapchainComposition swapchainComposition,
+                                          SDL_GPUPresentMode presentMode)
+{
+    (void)driverData;
+    WindowData *windowData = WebGPU_INTERNAL_FetchWindowData(window);
+    if (WebGPU_SupportsPresentMode(driverData, window, presentMode) && WebGPU_SupportsSwapchainComposition(driverData, window, swapchainComposition)) {
+        windowData->presentMode = presentMode;
+        windowData->swapchainComposition = swapchainComposition;
+        windowData->needsSwapchainRecreate = true;
+    } else {
+        return false;
+    }
+
     return true;
 }
 
@@ -3091,7 +3170,6 @@ static void WebGPU_SetTextureName(
     wgpuTextureViewSetLabel(webgpuTexture->fullView, name);
 }
 
-
 static SDL_GPUTexture *WebGPU_CreateTexture(
     SDL_GPURenderer *driverData,
     const SDL_GPUTextureCreateInfo *textureCreateInfo)
@@ -3110,7 +3188,7 @@ static SDL_GPUTexture *WebGPU_CreateTexture(
     Uint32 layerCount = SDL_max(textureCreateInfo->layer_count_or_depth, 1);
 
     WGPUTextureDescriptor textureDesc = {
-        .label = "SDL_GPU WebGPU Texture",
+        .label = "New SDL_GPU WebGPU Texture",
         .size = (WGPUExtent3D){
             .width = textureCreateInfo->width,
             .height = textureCreateInfo->height,
@@ -3143,11 +3221,16 @@ static SDL_GPUTexture *WebGPU_CreateTexture(
 
     /*INTERNAL_PRINT_32BITS(texture->common.info.usage);*/
 
-    SDL_Log("layer count or depth: %u", textureCreateInfo->layer_count_or_depth);
+    char tex_label[64];
+    char view_label[64];
+    SDL_snprintf(tex_label, sizeof(tex_label), "SDL_GPU WebGPU Texture %p", wgpuTexture);
+    wgpuTextureSetLabel(wgpuTexture, tex_label);
+
+    SDL_snprintf(view_label, sizeof(view_label), "SDL_GPU WebGPU Texture %p's View", wgpuTexture);
 
     // Create Texture View for the texture
     WGPUTextureViewDescriptor viewDesc = {
-        .label = "SDL_GPU WebGPU Texture View",
+        .label = view_label,
         .format = textureDesc.format,
         .dimension = SDLToWGPUTextureViewDimension(textureCreateInfo->type),
         .baseMipLevel = 0,
@@ -3167,12 +3250,10 @@ static SDL_GPUTexture *WebGPU_CreateTexture(
 
     texture->debugName = NULL;
 
-    char tex_label[64];
-    SDL_snprintf(tex_label, sizeof(tex_label), "SDL_GPU WebGPU Texture %p", wgpuTexture);
-    WebGPU_SetTextureName(driverData, (SDL_GPUTexture *)texture, tex_label);
-
     SDL_Log("Created texture %p", texture->texture);
     SDL_Log("Created texture view %p, for texture %p", texture->fullView, texture->texture);
+    SDL_Log("Created texture's depth/arraylayers: %u", wgpuTextureGetDepthOrArrayLayers(texture->texture));
+
     return (SDL_GPUTexture *)texture;
 }
 
@@ -3239,6 +3320,8 @@ static void WebGPU_UploadToTexture(SDL_GPUCommandBuffer *commandBuffer,
         .height = destination->h,
         .depthOrArrayLayers = destination->d,
     };
+
+    SDL_Log("Copy Texture depthOrArrayLayers: %u", extent.depthOrArrayLayers);
 
     wgpuQueueWriteTexture(
         wgpuCmdBuf->renderer->queue,
@@ -3741,6 +3824,10 @@ static SDL_GPUDevice *WebGPU_CreateDevice(bool debug, bool preferLowPower, SDL_P
     result->AcquireSwapchainTexture = WebGPU_AcquireSwapchainTexture;
     result->GetSwapchainTextureFormat = WebGPU_GetSwapchainTextureFormat;
     result->SupportsTextureFormat = WebGPU_SupportsTextureFormat;
+    result->SupportsSampleCount = WebGPU_SupportsSampleCount;
+    result->SupportsPresentMode = WebGPU_SupportsPresentMode;
+    result->SupportsSwapchainComposition = WebGPU_SupportsSwapchainComposition;
+    result->SetSwapchainParameters = WebGPU_SetSwapchainParameters;
 
     result->CreateBuffer = WebGPU_CreateGPUBuffer;
     result->ReleaseBuffer = WebGPU_ReleaseBuffer;
