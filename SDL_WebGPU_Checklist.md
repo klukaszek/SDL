@@ -2,10 +2,15 @@
 
 ## General
 - [x] DestroyDevice
-- [ ] SupportsSwapchainComposition
-- [ ] SupportsPresentMode
+- [x] SupportsPresentMode
 - [x] ClaimWindow
 - [x] ReleaseWindow
+
+## Swapchains
+- [x] SetSwapchainParameters
+- [x] SupportsTextureFormat
+- [x] SupportsSampleCount
+- [x] SupportsSwapchainComposition
 
 ## Command Buffers and Fences
 - [x] AcquireCommandBuffer
@@ -110,9 +115,4 @@ Note: All functions are implemented but have not been fully tested for memory co
 - [x] SetStencilReference
 
 ## Composition
-- [ ] Blit
-
-## Swapchains
-- [ ] SetSwapchainParameters
-- [ ] SupportsTextureFormat
-- [ ] SupportsSampleCount
+- [ ] Blit (IN PROGRESS)
