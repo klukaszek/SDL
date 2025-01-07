@@ -1408,6 +1408,15 @@ SDL_GPURenderPass *SDL_BeginGPURenderPass(
                 SDL_assert_release(!"Cannot cycle color target when load op is LOAD!");
             }
 
+            // Get hint to check for "webgpu"
+            const char *backend = SDL_GetHint(SDL_HINT_GPU_DRIVER);
+            bool is_webgpu = SDL_strcasecmp(backend, "webgpu") == 0;
+
+            // WebGPU uses ~0u for default layer_or_depth_plane, however this causes issues with other backends
+            if (color_target_infos[i].layer_or_depth_plane == ~0u && !is_webgpu) {
+                SDL_memset((void *)&color_target_infos[i].layer_or_depth_plane, 0, sizeof(color_target_infos[i].layer_or_depth_plane));
+            }
+
             if (color_target_infos[i].store_op == SDL_GPU_STOREOP_RESOLVE || color_target_infos[i].store_op == SDL_GPU_STOREOP_RESOLVE_AND_STORE) {
                 if (color_target_infos[i].resolve_texture == NULL) {
                     SDL_assert_release(!"Store op is RESOLVE or RESOLVE_AND_STORE but resolve_texture is NULL!");

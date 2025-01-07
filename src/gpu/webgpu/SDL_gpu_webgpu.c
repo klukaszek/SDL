@@ -2031,28 +2031,62 @@ static void WebGPU_BeginRenderPass(SDL_GPUCommandBuffer *commandBuffer,
 {
     WebGPUCommandBuffer *wgpuCmdBuf = (WebGPUCommandBuffer *)commandBuffer;
     WebGPUTexture *texture = NULL;
-
     if (colorAttachmentCount == 0) {
         SDL_LogError(SDL_LOG_CATEGORY_GPU, "No color attachments provided for render pass");
         return;
     }
 
-    // Build WGPU color attachments from the SDL color attachment structs
     WGPURenderPassColorAttachment *colorAttachments = SDL_malloc(sizeof(WGPURenderPassColorAttachment) * colorAttachmentCount);
     for (Uint32 i = 0; i < colorAttachmentCount; i += 1) {
-        texture = (WebGPUTexture *)colorAttachmentInfos[i].texture;
+        const SDL_GPUColorTargetInfo *colorInfo = &colorAttachmentInfos[i];
+        texture = (WebGPUTexture *)colorInfo->texture;
+        WGPUTextureView textureView = texture->fullView;
+
+        // Handle layer/depth plane views for 3D and 2D array textures
+        if (colorInfo->layer_or_depth_plane != ~0u && texture->layerCount > 1) {
+            WGPUTextureViewDescriptor viewDesc = {
+                .format = SDLToWGPUTextureFormat(texture->format),
+                .dimension = WGPUTextureViewDimension_2D, // Always 2D view for render target
+                .baseMipLevel = 0,
+                .mipLevelCount = 1,
+                .baseArrayLayer = colorInfo->layer_or_depth_plane,
+                .arrayLayerCount = 1
+            };
+
+            // Adjust the view based on texture type
+            if (texture->type == SDL_GPU_TEXTURETYPE_3D) {
+                // For 3D textures, we need to specify the depth slice
+                viewDesc.dimension = WGPUTextureViewDimension_3D;
+                viewDesc.baseArrayLayer = 0;
+                viewDesc.arrayLayerCount = 1;
+                // The depth slice will be handled by depthSlice in the color attachment
+            } else if (texture->type == SDL_GPU_TEXTURETYPE_2D_ARRAY) {
+                // For 2D array textures, we use array layers
+                viewDesc.dimension = WGPUTextureViewDimension_2D;
+                viewDesc.baseArrayLayer = colorInfo->layer_or_depth_plane;
+                viewDesc.arrayLayerCount = 1;
+            }
+
+            textureView = wgpuTextureCreateView(texture->texture, &viewDesc);
+        }
+
         colorAttachments[i] = (WGPURenderPassColorAttachment){
-            .view = texture->fullView,
-            .depthSlice = ~0u,
-            .loadOp = SDLToWGPULoadOp(colorAttachmentInfos[i].load_op),
-            .storeOp = SDLToWGPUStoreOp(colorAttachmentInfos[i].store_op),
+            .view = textureView,
+            .depthSlice = texture->type == SDL_GPU_TEXTURETYPE_3D ? colorInfo->layer_or_depth_plane : ~0u,
+            .loadOp = SDLToWGPULoadOp(colorInfo->load_op),
+            .storeOp = SDLToWGPUStoreOp(colorInfo->store_op),
             .clearValue = (WGPUColor){
-                .r = colorAttachmentInfos[i].clear_color.r,
-                .g = colorAttachmentInfos[i].clear_color.g,
-                .b = colorAttachmentInfos[i].clear_color.b,
-                .a = colorAttachmentInfos[i].clear_color.a,
+                .r = colorInfo->clear_color.r,
+                .g = colorInfo->clear_color.g,
+                .b = colorInfo->clear_color.b,
+                .a = colorInfo->clear_color.a,
             },
         };
+
+        // Clean up the temporary view if we created one
+        if (textureView != texture->fullView) {
+            /*wgpuTextureViewRelease(textureView);*/
+        }
 
         // If we have an MSAA texture, we need to make sure the resolve target is not NULL
         if (texture->isMSAAColorTarget) {
