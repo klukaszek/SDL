@@ -19,6 +19,7 @@
 #include <emscripten/emscripten.h>
 #include <emscripten/html5.h>
 #include <regex.h>
+#include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <webgpu/webgpu.h>
@@ -363,18 +364,35 @@ typedef struct WebGPUCommandBuffer
     WebGPUBindGroup *bindGroups;
     Uint32 bindGroupCount;
 
-    bool resourcesDirty;
+    /*bool resourcesDirty;*/
 
     WebGPUViewport currentViewport;
     WebGPURect currentScissor;
 
-    WebGPUGraphicsPipeline **usedGraphicsPipelines;
-    Uint32 usedGraphicsPipelineCount;
-    Uint32 usedGraphicsPipelineCapacity;
+    // Used to track layer views that need to be released when the command buffer is destroyed
+    WGPUTextureView *layerViews;
+    Uint32 layerViewCount;
+
+    /*WebGPUGraphicsPipeline **usedGraphicsPipelines;*/
+    /*Uint32 usedGraphicsPipelineCount;*/
+    /*Uint32 usedGraphicsPipelineCapacity;*/
 
     // ... (other fields as needed)
 
 } WebGPUCommandBuffer;
+
+typedef struct BlitPipelineCache
+{
+    WGPUShaderModule vertexModule;
+    WGPUShaderModule fragmentModule;
+    WGPURenderPipeline blitPipeline;
+    WGPUBindGroupLayout bindGroupLayout;
+    WGPUPipelineLayout pipelineLayout;
+    WGPUBindGroup bindGroup;
+    WGPUBuffer uniformBuffer;
+    WGPUSampler nearestSampler;
+    WGPUSampler linearSampler;
+} BlitPipelineCache;
 
 typedef struct WebGPURenderer
 {
@@ -389,9 +407,13 @@ typedef struct WebGPURenderer
     WindowData **claimedWindows;
     Uint32 claimedWindowCount;
     Uint32 claimedWindowCapacity;
+
+    BlitPipelineCache blitCache;
 } WebGPURenderer;
 
 // ---------------------------------------------------
+
+void WebGPU_INTERNAL_InitializeBlitCache(WebGPURenderer *renderer);
 
 // Shader Reflection Functions
 // ---------------------------------------------------
@@ -714,7 +736,7 @@ static WGPUTextureUsageFlags SDLToWGPUTextureUsageFlags(SDL_GPUTextureUsageFlags
         wgpuFlags |= WGPUTextureUsage_TextureBinding | WGPUTextureUsage_CopyDst;
     }
     if (usageFlags & SDL_GPU_TEXTUREUSAGE_COLOR_TARGET) {
-        wgpuFlags |= WGPUTextureUsage_RenderAttachment;
+        wgpuFlags |= WGPUTextureUsage_RenderAttachment | WGPUTextureUsage_CopyDst;
     }
     if (usageFlags & SDL_GPU_TEXTUREUSAGE_DEPTH_STENCIL_TARGET) {
         wgpuFlags |= WGPUTextureUsage_RenderAttachment;
@@ -1092,26 +1114,26 @@ static WGPUVertexFormat SDLToWGPUVertexFormat(SDL_GPUVertexElementFormat format)
 // Simple Error Callback for WebGPU
 static void WebGPU_ErrorCallback(WGPUErrorType type, const char *message, void *userdata)
 {
-    const char *errorTypeStr;
-    switch (type) {
-    case WGPUErrorType_Validation:
-        errorTypeStr = "Validation Error";
-        break;
-    case WGPUErrorType_OutOfMemory:
-        errorTypeStr = "Out of Memory Error";
-        break;
-    case WGPUErrorType_Unknown:
-        errorTypeStr = "Unknown Error";
-        break;
-    case WGPUErrorType_DeviceLost:
-        errorTypeStr = "Device Lost Error";
-        break;
-    default:
-        errorTypeStr = "Unhandled Error Type";
-        break;
-    }
-    // Output the error information to the console
-    SDL_Log("[%s]: %s\n", errorTypeStr, message);
+    /*const char *errorTypeStr;*/
+    /*switch (type) {*/
+    /*case WGPUErrorType_Validation:*/
+    /*    errorTypeStr = "Validation Error";*/
+    /*    break;*/
+    /*case WGPUErrorType_OutOfMemory:*/
+    /*    errorTypeStr = "Out of Memory Error";*/
+    /*    break;*/
+    /*case WGPUErrorType_Unknown:*/
+    /*    errorTypeStr = "Unknown Error";*/
+    /*    break;*/
+    /*case WGPUErrorType_DeviceLost:*/
+    /*    errorTypeStr = "Device Lost Error";*/
+    /*    break;*/
+    /*default:*/
+    /*    errorTypeStr = "Unhandled Error Type";*/
+    /*    break;*/
+    /*}*/
+    /*// Output the error information to the console*/
+    /*SDL_Log("[%s]: %s\n", errorTypeStr, message);*/
 }
 
 // Device Request Callback for when the device is requested from the adapter
@@ -1466,8 +1488,8 @@ static void WebGPU_DownloadFromBuffer(
         return;
     }
 
-    if (source->offset + source->size > (Uint32)srcBuffer->size ||
-        destination->offset + source->size > (Uint32)dstBuffer->size) {
+    if (source->offset + source->size > srcBuffer->size ||
+        destination->offset + source->size > dstBuffer->size) {
         SDL_LogError(SDL_LOG_CATEGORY_GPU, "Invalid buffer region");
         return;
     }
@@ -1577,12 +1599,12 @@ static void WebGPU_INTERNAL_BindSamplers(SDL_GPUCommandBuffer *commandBuffer,
         return;
     }
 
-    WebGPUCommandBuffer *wgpuCmdBuf = (WebGPUCommandBuffer *)commandBuffer;
-    if (wgpuCmdBuf->currentGraphicsPipeline == NULL) {
+    WebGPUCommandBuffer *wgpu_cmd_buf = (WebGPUCommandBuffer *)commandBuffer;
+    if (wgpu_cmd_buf->currentGraphicsPipeline == NULL) {
         SDL_LogError(SDL_LOG_CATEGORY_GPU, "No current graphics pipeline set");
         return;
     }
-    WebGPUGraphicsPipeline *pipeline = wgpuCmdBuf->currentGraphicsPipeline;
+    WebGPUGraphicsPipeline *pipeline = wgpu_cmd_buf->currentGraphicsPipeline;
     if (pipeline->resourceLayout == NULL) {
         SDL_LogError(SDL_LOG_CATEGORY_GPU, "No resource layout set for current graphics pipeline");
         return;
@@ -1621,7 +1643,7 @@ static void WebGPU_INTERNAL_BindSamplers(SDL_GPUCommandBuffer *commandBuffer,
 
     // Allocate memory for the bind groups in the command buffer
     for (Uint32 i = 0; i < bgLayoutCount; i += 1) {
-        wgpuCmdBuf->bindGroups[i].entries = SDL_aligned_alloc(alignof(WGPUBindGroupEntry), sizeof(WGPUBindGroupEntry) * resourceLayout->bindGroupLayouts[i].bindingCount);
+        wgpu_cmd_buf->bindGroups[i].entries = SDL_aligned_alloc(alignof(WGPUBindGroupEntry), sizeof(WGPUBindGroupEntry) * resourceLayout->bindGroupLayouts[i].bindingCount);
     }
 
     size_t currentSampler = 0;
@@ -1652,7 +1674,7 @@ static void WebGPU_INTERNAL_BindSamplers(SDL_GPUCommandBuffer *commandBuffer,
 
                 // Add the bind group entry to the current resources if the binding matches the layout slot
                 if (layBinding->binding == j) {
-                    wgpuCmdBuf->bindGroups[i].entries[j] = (WGPUBindGroupEntry){
+                    wgpu_cmd_buf->bindGroups[i].entries[j] = (WGPUBindGroupEntry){
                         .binding = layBinding->binding,
                         .sampler = sampler->sampler,
                     };
@@ -1663,7 +1685,7 @@ static void WebGPU_INTERNAL_BindSamplers(SDL_GPUCommandBuffer *commandBuffer,
                 // Save this entry in the current resources for later use when we build the bind group
                 // Add the bind group entry to the current resources if the binding matches the layout slot
                 if (layBinding->binding == j) {
-                    wgpuCmdBuf->bindGroups[i].entries[j] = (WGPUBindGroupEntry){
+                    wgpu_cmd_buf->bindGroups[i].entries[j] = (WGPUBindGroupEntry){
                         .binding = layBinding->binding,
                         .textureView = texture->fullView,
                     };
@@ -1929,6 +1951,8 @@ static SDL_GPUCommandBuffer *WebGPU_AcquireCommandBuffer(SDL_GPURenderer *driver
     height = renderer->claimedWindows[0]->window->h;
     commandBuffer->currentViewport = (WebGPUViewport){ 0, 0, width, height, 0.0, 1.0 };
     commandBuffer->currentScissor = (WebGPURect){ 0, 0, width, height };
+    commandBuffer->layerViews = SDL_malloc(sizeof(WGPUTextureView) * 32);
+    commandBuffer->layerViewCount = 0;
 
     WGPUCommandEncoderDescriptor commandEncoderDesc = {
         .label = "SDL_GPU Command Encoder",
@@ -1941,15 +1965,15 @@ static SDL_GPUCommandBuffer *WebGPU_AcquireCommandBuffer(SDL_GPURenderer *driver
 
 static bool WebGPU_Submit(SDL_GPUCommandBuffer *commandBuffer)
 {
-    WebGPUCommandBuffer *wgpuCmdBuf = (WebGPUCommandBuffer *)commandBuffer;
-    WebGPURenderer *renderer = wgpuCmdBuf->renderer;
+    WebGPUCommandBuffer *wgpu_cmd_buf = (WebGPUCommandBuffer *)commandBuffer;
+    WebGPURenderer *renderer = wgpu_cmd_buf->renderer;
 
     WGPUCommandBufferDescriptor commandBufferDesc = {
         .label = "SDL_GPU Command Buffer",
     };
 
     // Finish the command buffer and submit it to the queue
-    WGPUCommandBuffer commandHandle = wgpuCommandEncoderFinish(wgpuCmdBuf->commandEncoder, &commandBufferDesc);
+    WGPUCommandBuffer commandHandle = wgpuCommandEncoderFinish(wgpu_cmd_buf->commandEncoder, &commandBufferDesc);
     if (!commandHandle) {
         SDL_LogError(SDL_LOG_CATEGORY_GPU, "Failed to finish command buffer");
         return false;
@@ -1958,27 +1982,31 @@ static bool WebGPU_Submit(SDL_GPUCommandBuffer *commandBuffer)
 
     // Release the actual command buffer and command encoder
     wgpuCommandBufferRelease(commandHandle);
-    wgpuCommandEncoderRelease(wgpuCmdBuf->commandEncoder);
+    wgpuCommandEncoderRelease(wgpu_cmd_buf->commandEncoder);
+
+    // Release any layer views that were created
+    for (Uint32 i = 0; i < wgpu_cmd_buf->layerViewCount; i += 1) {
+        wgpuTextureViewRelease(wgpu_cmd_buf->layerViews[i]);
+    }
 
     // Release any bind groups that were created
-    if (wgpuCmdBuf->bindGroups) {
-
-        for (size_t i = 0; i < wgpuCmdBuf->bindGroupCount; i += 1) {
-            /*SDL_Log("BindGroup: %zu, Entries: %zu", i, wgpuCmdBuf->bindGroups[i].entryCount);*/
-            for (size_t j = 0; j < wgpuCmdBuf->bindGroups[i].entryCount; j += 1) {
-                /*SDL_Log("\tEntry %zu: Binding %d", j, wgpuCmdBuf->bindGroups[i].entries[j].binding);*/
+    if (wgpu_cmd_buf->bindGroups) {
+        for (size_t i = 0; i < wgpu_cmd_buf->bindGroupCount; i += 1) {
+            /*SDL_Log("BindGroup: %zu, Entries: %zu", i, wgpu_cmd_buf->bindGroups[i].entryCount);*/
+            for (size_t j = 0; j < wgpu_cmd_buf->bindGroups[i].entryCount; j += 1) {
+                /*SDL_Log("\tEntry %zu: Binding %d", j, wgpu_cmd_buf->bindGroups[i].entries[j].binding);*/
             }
         }
 
-        for (Uint32 i = 0; i < wgpuCmdBuf->bindGroupCount; i += 1) {
+        for (Uint32 i = 0; i < wgpu_cmd_buf->bindGroupCount; i += 1) {
             // We don't free the BindGroup as it is owned by the pipeline and not the cmdBuffer
-            SDL_aligned_free(wgpuCmdBuf->bindGroups[i].entries);
+            SDL_aligned_free(wgpu_cmd_buf->bindGroups[i].entries);
         }
-        SDL_free(wgpuCmdBuf->bindGroups);
+        SDL_free(wgpu_cmd_buf->bindGroups);
     }
 
     // Release the memory for the command buffer
-    SDL_free(wgpuCmdBuf);
+    SDL_free(wgpu_cmd_buf);
 
     return true;
 }
@@ -2024,50 +2052,57 @@ static void WebGPU_ReleaseFence(SDL_GPURenderer *driverData, SDL_GPUFence *fence
     // There are no fences in WebGPU, so we don't need to do anything here
 }
 
-static void WebGPU_BeginRenderPass(SDL_GPUCommandBuffer *commandBuffer,
-                                   const SDL_GPUColorTargetInfo *colorAttachmentInfos,
-                                   Uint32 colorAttachmentCount,
-                                   const SDL_GPUDepthStencilTargetInfo *depthStencilAttachmentInfo)
+static WGPUTextureView WebGPU_INTERNAL_CreateLayerView(WGPUTexture texture,
+                                                       WGPUTextureFormat format,
+                                                       SDL_GPUTextureType type,
+                                                       uint32_t layer)
 {
-    WebGPUCommandBuffer *wgpuCmdBuf = (WebGPUCommandBuffer *)commandBuffer;
-    WebGPUTexture *texture = NULL;
-    if (colorAttachmentCount == 0) {
-        SDL_LogError(SDL_LOG_CATEGORY_GPU, "No color attachments provided for render pass");
+    WGPUTextureViewDescriptor viewDesc = {
+        .format = format,
+        .dimension = WGPUTextureViewDimension_2D,
+        .baseMipLevel = 0,
+        .mipLevelCount = 1,
+        .baseArrayLayer = layer,
+        .arrayLayerCount = 1,
+        .label = "SDL_GPU Temporary Layer View",
+    };
+
+    if (type == SDL_GPU_TEXTURETYPE_3D) {
+        viewDesc.dimension = WGPUTextureViewDimension_3D;
+        viewDesc.baseArrayLayer = 0;
+        viewDesc.arrayLayerCount = 1;
+    }
+
+    return wgpuTextureCreateView(texture, &viewDesc);
+}
+
+void WebGPU_BeginRenderPass(SDL_GPUCommandBuffer *commandBuffer,
+                            const SDL_GPUColorTargetInfo *colorAttachmentInfos,
+                            uint32_t colorAttachmentCount,
+                            const SDL_GPUDepthStencilTargetInfo *depthStencilAttachmentInfo)
+{
+    WebGPUCommandBuffer *wgpu_cmd_buf = (WebGPUCommandBuffer *)commandBuffer;
+    if (!wgpu_cmd_buf || colorAttachmentCount == 0) {
         return;
     }
 
-    WGPURenderPassColorAttachment *colorAttachments = SDL_malloc(sizeof(WGPURenderPassColorAttachment) * colorAttachmentCount);
-    for (Uint32 i = 0; i < colorAttachmentCount; i += 1) {
+    WGPURenderPassColorAttachment *colorAttachments =
+        SDL_malloc(sizeof(WGPURenderPassColorAttachment) * colorAttachmentCount);
+    if (!colorAttachments) {
+        return;
+    }
+
+    for (uint32_t i = 0; i < colorAttachmentCount; i++) {
         const SDL_GPUColorTargetInfo *colorInfo = &colorAttachmentInfos[i];
-        texture = (WebGPUTexture *)colorInfo->texture;
+        WebGPUTexture *texture = (WebGPUTexture *)colorInfo->texture;
         WGPUTextureView textureView = texture->fullView;
 
-        // Handle layer/depth plane views for 3D and 2D array textures
         if (colorInfo->layer_or_depth_plane != ~0u && texture->layerCount > 1) {
-            WGPUTextureViewDescriptor viewDesc = {
-                .format = SDLToWGPUTextureFormat(texture->format),
-                .dimension = WGPUTextureViewDimension_2D, // Always 2D view for render target
-                .baseMipLevel = 0,
-                .mipLevelCount = 1,
-                .baseArrayLayer = colorInfo->layer_or_depth_plane,
-                .arrayLayerCount = 1
-            };
-
-            // Adjust the view based on texture type
-            if (texture->type == SDL_GPU_TEXTURETYPE_3D) {
-                // For 3D textures, we need to specify the depth slice
-                viewDesc.dimension = WGPUTextureViewDimension_3D;
-                viewDesc.baseArrayLayer = 0;
-                viewDesc.arrayLayerCount = 1;
-                // The depth slice will be handled by depthSlice in the color attachment
-            } else if (texture->type == SDL_GPU_TEXTURETYPE_2D_ARRAY) {
-                // For 2D array textures, we use array layers
-                viewDesc.dimension = WGPUTextureViewDimension_2D;
-                viewDesc.baseArrayLayer = colorInfo->layer_or_depth_plane;
-                viewDesc.arrayLayerCount = 1;
-            }
-
-            textureView = wgpuTextureCreateView(texture->texture, &viewDesc);
+            textureView = WebGPU_INTERNAL_CreateLayerView(texture->texture,
+                                                          SDLToWGPUTextureFormat(texture->format),
+                                                          texture->type,
+                                                          colorInfo->layer_or_depth_plane);
+            wgpu_cmd_buf->layerViews[wgpu_cmd_buf->layerViewCount++] = textureView;
         }
 
         colorAttachments[i] = (WGPURenderPassColorAttachment){
@@ -2080,64 +2115,62 @@ static void WebGPU_BeginRenderPass(SDL_GPUCommandBuffer *commandBuffer,
                 .g = colorInfo->clear_color.g,
                 .b = colorInfo->clear_color.b,
                 .a = colorInfo->clear_color.a,
-            },
+            }
         };
 
-        // Clean up the temporary view if we created one
         if (textureView != texture->fullView) {
-            /*wgpuTextureViewRelease(textureView);*/
+            // Handle view cleanup
         }
 
-        // If we have an MSAA texture, we need to make sure the resolve target is not NULL
         if (texture->isMSAAColorTarget) {
             colorAttachments[i].resolveTarget = texture->fullView;
         }
     }
 
-    WGPURenderPassDepthStencilAttachment depthStencilAttachment;
-    // Set depth stencil attachment if provided
-    if (depthStencilAttachmentInfo != NULL) {
-        // Get depth texture as WebGPUTexture
-        texture = (WebGPUTexture *)depthStencilAttachmentInfo->texture;
+    // Handle depth-stencil attachment
+    WGPURenderPassDepthStencilAttachment depthStencilAttachment = { 0 };
+    if (depthStencilAttachmentInfo) {
+        WebGPUTexture *depthTex = (WebGPUTexture *)depthStencilAttachmentInfo->texture;
         depthStencilAttachment = (WGPURenderPassDepthStencilAttachment){
-            .view = texture->fullView,
+            .view = depthTex->fullView,
             .depthLoadOp = SDLToWGPULoadOp(depthStencilAttachmentInfo->load_op),
             .depthStoreOp = SDLToWGPUStoreOp(depthStencilAttachmentInfo->store_op),
             .depthClearValue = depthStencilAttachmentInfo->clear_depth,
             .stencilLoadOp = SDLToWGPULoadOp(depthStencilAttachmentInfo->stencil_load_op),
             .stencilStoreOp = SDLToWGPUStoreOp(depthStencilAttachmentInfo->stencil_store_op),
-            .stencilClearValue = depthStencilAttachmentInfo->clear_stencil,
+            .stencilClearValue = depthStencilAttachmentInfo->clear_stencil
         };
     }
 
-    // Set color attachments for the render pass
     WGPURenderPassDescriptor renderPassDesc = {
         .label = "SDL_GPU Render Pass",
         .colorAttachmentCount = colorAttachmentCount,
         .colorAttachments = colorAttachments,
-        .depthStencilAttachment = depthStencilAttachmentInfo != NULL ? &depthStencilAttachment : NULL,
+        .depthStencilAttachment = depthStencilAttachmentInfo ? &depthStencilAttachment : NULL
     };
 
-    // Begin the render pass
-    wgpuCmdBuf->renderPassEncoder = wgpuCommandEncoderBeginRenderPass(wgpuCmdBuf->commandEncoder, &renderPassDesc);
+    wgpu_cmd_buf->renderPassEncoder =
+        wgpuCommandEncoderBeginRenderPass(wgpu_cmd_buf->commandEncoder, &renderPassDesc);
+
+    SDL_free(colorAttachments);
 }
 
 static void WebGPU_EndRenderPass(SDL_GPUCommandBuffer *commandBuffer)
 {
-    WebGPUCommandBuffer *wgpuCmdBuf = (WebGPUCommandBuffer *)commandBuffer;
+    WebGPUCommandBuffer *wgpu_cmd_buf = (WebGPUCommandBuffer *)commandBuffer;
 
     // Finish the render pass with all bind groups set
-    wgpuRenderPassEncoderEnd(wgpuCmdBuf->renderPassEncoder);
-    wgpuRenderPassEncoderRelease(wgpuCmdBuf->renderPassEncoder);
+    wgpuRenderPassEncoderEnd(wgpu_cmd_buf->renderPassEncoder);
+    wgpuRenderPassEncoderRelease(wgpu_cmd_buf->renderPassEncoder);
 }
 
 static void WebGPU_BeginCopyPass(SDL_GPUCommandBuffer *commandBuffer)
 {
-    WebGPUCommandBuffer *wgpuCmdBuf = (WebGPUCommandBuffer *)commandBuffer;
+    WebGPUCommandBuffer *wgpu_cmd_buf = (WebGPUCommandBuffer *)commandBuffer;
     WGPUCommandEncoderDescriptor commandEncoderDesc = {
         .label = "SDL_GPU Copy Encoder",
     };
-    wgpuCmdBuf->commandEncoder = wgpuDeviceCreateCommandEncoder(wgpuCmdBuf->renderer->device, &commandEncoderDesc);
+    wgpu_cmd_buf->commandEncoder = wgpuDeviceCreateCommandEncoder(wgpu_cmd_buf->renderer->device, &commandEncoderDesc);
 }
 
 static void WebGPU_EndCopyPass(SDL_GPUCommandBuffer *commandBuffer)
@@ -2186,10 +2219,11 @@ static void WebGPU_CreateSwapchain(WebGPURenderer *renderer, WindowData *windowD
     // Swapchain should be the size of whatever SDL_Window it is attached to
     swapchainData->width = windowData->window->w;
     swapchainData->height = windowData->window->h;
+    swapchainData->sampleCount = 1;
 
     // Emscripten WebGPU swapchain
     WGPUSwapChainDescriptor swapchainDesc = {
-        .usage = WGPUTextureUsage_RenderAttachment,
+        .usage = WGPUTextureUsage_RenderAttachment | WGPUTextureUsage_CopySrc | WGPUTextureUsage_CopyDst,
         .format = swapchainData->format,
         .width = swapchainData->width,
         .height = swapchainData->height,
@@ -2298,8 +2332,8 @@ static bool WebGPU_AcquireSwapchainTexture(
     Uint32 *ret_width,
     Uint32 *ret_height)
 {
-    WebGPUCommandBuffer *wgpuCmdBuf = (WebGPUCommandBuffer *)commandBuffer;
-    WebGPURenderer *renderer = wgpuCmdBuf->renderer;
+    WebGPUCommandBuffer *wgpu_cmd_buf = (WebGPUCommandBuffer *)commandBuffer;
+    WebGPURenderer *renderer = wgpu_cmd_buf->renderer;
     WindowData *windowData = WebGPU_INTERNAL_FetchWindowData(window);
     WebGPUSwapchainData *swapchainData = windowData->swapchainData;
 
@@ -2340,7 +2374,7 @@ static bool WebGPU_AcquireSwapchainTexture(
     texture->type = SDL_GPU_TEXTURETYPE_2D;
     texture->isMSAAColorTarget = swapchainData->sampleCount > 1;
     texture->format = WGPUToSDLTextureFormat(swapchainData->format);
-    texture->usage = SDL_GPU_TEXTUREUSAGE_COLOR_TARGET;
+    texture->usage = SDL_GPU_TEXTUREUSAGE_COLOR_TARGET | SDL_GPU_TEXTUREUSAGE_GRAPHICS_STORAGE_READ;
     texture->common = (TextureCommonHeader){
         .info = {
             .usage = texture->usage,
@@ -2580,7 +2614,7 @@ static SDL_GPUShader *WebGPU_CreateShader(
 
     WGPUShaderModuleDescriptor shader_desc = {
         .nextInChain = (WGPUChainedStruct *)&wgsl_desc,
-        .label = "SDL_GPU WebGPU WGSL Cross-Compiled Shader",
+        .label = "SDL_GPU WebGPU WGSL Shader",
     };
 
     // Create a WebGPUShader object to cast to SDL_GPUShader *
@@ -3232,7 +3266,7 @@ static SDL_GPUTexture *WebGPU_CreateTexture(
         .sampleCount = SDLToWGPUSampleCount(textureCreateInfo->sample_count),
         .dimension = SDLToWGPUTextureDimension(textureCreateInfo->type),
         .format = SDLToWGPUTextureFormat(textureCreateInfo->format),
-        .usage = SDLToWGPUTextureUsageFlags(textureCreateInfo->usage),
+        .usage = SDLToWGPUTextureUsageFlags(textureCreateInfo->usage) | WGPUTextureUsage_CopySrc,
     };
 
     WGPUTexture wgpuTexture = wgpuDeviceCreateTexture(renderer->device, &textureDesc);
@@ -3262,15 +3296,17 @@ static SDL_GPUTexture *WebGPU_CreateTexture(
 
     SDL_snprintf(view_label, sizeof(view_label), "SDL_GPU WebGPU Texture %p's View", wgpuTexture);
 
+    WGPUTextureViewDimension dimension = SDLToWGPUTextureViewDimension(textureCreateInfo->type);
+
     // Create Texture View for the texture
     WGPUTextureViewDescriptor viewDesc = {
         .label = view_label,
         .format = textureDesc.format,
-        .dimension = SDLToWGPUTextureViewDimension(textureCreateInfo->type),
+        .dimension = dimension,
         .baseMipLevel = 0,
         .mipLevelCount = textureCreateInfo->num_levels,
         .baseArrayLayer = 0,
-        .arrayLayerCount = layerCount,
+        .arrayLayerCount = dimension == WGPUTextureViewDimension_3D ? 1 : layerCount,
     };
 
     // Create the texture view
@@ -3327,7 +3363,7 @@ static void WebGPU_UploadToTexture(SDL_GPUCommandBuffer *commandBuffer,
         return;
     }
 
-    WebGPUCommandBuffer *wgpuCmdBuf = (WebGPUCommandBuffer *)commandBuffer;
+    WebGPUCommandBuffer *wgpu_cmd_buf = (WebGPUCommandBuffer *)commandBuffer;
     WebGPUTexture *webgpuTexture = (WebGPUTexture *)destination->texture;
     WebGPUBuffer *transfer_buffer = (WebGPUBuffer *)source->transfer_buffer;
 
@@ -3358,7 +3394,7 @@ static void WebGPU_UploadToTexture(SDL_GPUCommandBuffer *commandBuffer,
     SDL_Log("Copy Texture depthOrArrayLayers: %u", extent.depthOrArrayLayers);
 
     wgpuQueueWriteTexture(
-        wgpuCmdBuf->renderer->queue,
+        wgpu_cmd_buf->renderer->queue,
         &copyTexture,
         transfer_buffer->mappedData,
         transfer_buffer->size, // Make sure this matches exactly what we need
@@ -3380,7 +3416,7 @@ static void WebGPU_CopyTextureToTexture(SDL_GPUCommandBuffer *commandBuffer,
         return;
     }
 
-    WebGPUCommandBuffer *wgpuCmdBuf = (WebGPUCommandBuffer *)commandBuffer;
+    WebGPUCommandBuffer *wgpu_cmd_buf = (WebGPUCommandBuffer *)commandBuffer;
     WebGPUTexture *src_texture = (WebGPUTexture *)source->texture;
     WebGPUTexture *dst_texture = (WebGPUTexture *)destination->texture;
 
@@ -3413,7 +3449,7 @@ static void WebGPU_CopyTextureToTexture(SDL_GPUCommandBuffer *commandBuffer,
     };
 
     wgpuCommandEncoderCopyTextureToTexture(
-        wgpuCmdBuf->commandEncoder,
+        wgpu_cmd_buf->commandEncoder,
         &srcCopyTexture,
         &dstCopyTexture,
         &extent);
@@ -3428,7 +3464,7 @@ static void WebGPU_DownloadFromTexture(SDL_GPUCommandBuffer *commandBuffer,
         return;
     }
 
-    WebGPUCommandBuffer *wgpuCmdBuf = (WebGPUCommandBuffer *)commandBuffer;
+    WebGPUCommandBuffer *wgpu_cmd_buf = (WebGPUCommandBuffer *)commandBuffer;
     WebGPUTexture *webgpuTexture = (WebGPUTexture *)source->texture;
     WebGPUBuffer *transfer_buffer = (WebGPUBuffer *)destination->transfer_buffer;
 
@@ -3463,27 +3499,10 @@ static void WebGPU_DownloadFromTexture(SDL_GPUCommandBuffer *commandBuffer,
     };
 
     wgpuCommandEncoderCopyTextureToBuffer(
-        wgpuCmdBuf->commandEncoder,
+        wgpu_cmd_buf->commandEncoder,
         &copyTexture,
         &copyBuffer,
         &extent);
-}
-
-static void WebGPU_Blit(SDL_GPUCommandBuffer *commandBuffer,
-                        const SDL_GPUBlitInfo *info)
-{
-    if (!commandBuffer || !info) {
-        SDL_LogError(SDL_LOG_CATEGORY_GPU, "Invalid parameters for blitting");
-        return;
-    }
-
-    WebGPUCommandBuffer *wgpuCmdBuf = (WebGPUCommandBuffer *)commandBuffer;
-
-    const SDL_GPUBlitRegion *src_region = &info->source;
-    const SDL_GPUBlitRegion *dst_region = &info->destination;
-
-    WebGPUTexture *src_texture = (WebGPUTexture *)src_region->texture;
-    WebGPUTexture *dst_texture = (WebGPUTexture *)dst_region->texture;
 }
 
 static SDL_GPUSampler *WebGPU_CreateSampler(
@@ -3613,34 +3632,34 @@ static void WebGPU_BindGraphicsPipeline(
     SDL_GPUCommandBuffer *commandBuffer,
     SDL_GPUGraphicsPipeline *graphicsPipeline)
 {
-    WebGPUCommandBuffer *wgpuCmdBuf = (WebGPUCommandBuffer *)commandBuffer;
+    WebGPUCommandBuffer *wgpu_cmd_buf = (WebGPUCommandBuffer *)commandBuffer;
     WebGPUGraphicsPipeline *pipeline = (WebGPUGraphicsPipeline *)graphicsPipeline;
 
     // Set the current pipeline
-    wgpuCmdBuf->currentGraphicsPipeline = pipeline;
+    wgpu_cmd_buf->currentGraphicsPipeline = pipeline;
 
     // When we bind a new pipeline, we need to allocate memory for our bind groups
     Uint32 bindGroupCount = pipeline->resourceLayout->bindGroupLayoutCount;
 
     // If a new pipeline is bound, eliminate the old bind groups and create new ones
-    if (wgpuCmdBuf->bindGroups != NULL) {
+    if (wgpu_cmd_buf->bindGroups != NULL) {
         // Release the bind groups and free the entries
-        for (Uint32 i = 0; i < wgpuCmdBuf->bindGroupCount; i += 1) {
-            SDL_aligned_free(wgpuCmdBuf->bindGroups[i].entries);
+        for (Uint32 i = 0; i < wgpu_cmd_buf->bindGroupCount; i += 1) {
+            SDL_aligned_free(wgpu_cmd_buf->bindGroups[i].entries);
         }
 
-        SDL_free(wgpuCmdBuf->bindGroups);
+        SDL_free(wgpu_cmd_buf->bindGroups);
     }
 
     // Allocate memory for the bind groups
-    wgpuCmdBuf->bindGroups = SDL_malloc(sizeof(WebGPUBindGroup) * bindGroupCount);
+    wgpu_cmd_buf->bindGroups = SDL_malloc(sizeof(WebGPUBindGroup) * bindGroupCount);
 
     // Copy the pre-constructed bind groups from the pipeline to the command buffer
-    SDL_memcpy(wgpuCmdBuf->bindGroups, pipeline->bindGroups, sizeof(WebGPUBindGroup) * bindGroupCount);
-    wgpuCmdBuf->bindGroupCount = bindGroupCount;
+    SDL_memcpy(wgpu_cmd_buf->bindGroups, pipeline->bindGroups, sizeof(WebGPUBindGroup) * bindGroupCount);
+    wgpu_cmd_buf->bindGroupCount = bindGroupCount;
 
     // Analyze pipeline bindings and find any number of uniform buffers that need to be set.
-    // Assign them in order to wgpuCmdBuf->bindGroups[i].entries[j] where i is the bind group index
+    // Assign them in order to wgpu_cmd_buf->bindGroups[i].entries[j] where i is the bind group index
     // and j is the binding index.
 
     Uint32 fragUniformBufferCount = 0;
@@ -3649,19 +3668,19 @@ static void WebGPU_BindGraphicsPipeline(
     // Count uniform buffers for vertex and fragment shaders
     for (int i = 0; i < bindGroupCount; i += 1) {
         WebGPUBindGroupLayout *layout = &pipeline->resourceLayout->bindGroupLayouts[i];
-        WebGPUBindGroup *bindGroup = &wgpuCmdBuf->bindGroups[i];
+        WebGPUBindGroup *bindGroup = &wgpu_cmd_buf->bindGroups[i];
         // Allocate memory for the bind group entries that will be set when uniforms are pushed
         bindGroup->entries = SDL_aligned_alloc(alignof(WGPUBindGroupEntry), sizeof(WGPUBindGroupEntry) * layout->bindingCount);
         for (int j = 0; j < layout->bindingCount; j += 1) {
             WebGPUBindingInfo *binding = &layout->bindings[j];
             if (binding->type == WGPUBindingType_UniformBuffer) {
                 if (binding->stage == WEBGPU_SHADER_STAGE_FRAGMENT) {
-                    WebGPUUniformBuffer *fragUniformBuffer = &wgpuCmdBuf->currentGraphicsPipeline->fragUniformBuffers[fragUniformBufferCount];
+                    WebGPUUniformBuffer *fragUniformBuffer = &wgpu_cmd_buf->currentGraphicsPipeline->fragUniformBuffers[fragUniformBufferCount];
                     fragUniformBuffer->group = binding->group;
                     fragUniformBuffer->binding = binding->binding;
                     fragUniformBufferCount += 1;
                 } else if (binding->stage == WEBGPU_SHADER_STAGE_VERTEX) {
-                    WebGPUUniformBuffer *vertexUniformBuffer = &wgpuCmdBuf->currentGraphicsPipeline->vertexUniformBuffers[vertexUniformBufferCount];
+                    WebGPUUniformBuffer *vertexUniformBuffer = &wgpu_cmd_buf->currentGraphicsPipeline->vertexUniformBuffers[vertexUniformBufferCount];
                     vertexUniformBuffer->group = binding->group;
                     vertexUniformBuffer->binding = binding->binding;
                     vertexUniformBufferCount += 1;
@@ -3671,29 +3690,29 @@ static void WebGPU_BindGraphicsPipeline(
     }
 
     // Set the uniform buffer counts
-    wgpuCmdBuf->currentGraphicsPipeline->vertexUniformBufferCount = vertexUniformBufferCount;
-    wgpuCmdBuf->currentGraphicsPipeline->fragUniformBufferCount = fragUniformBufferCount;
+    wgpu_cmd_buf->currentGraphicsPipeline->vertexUniformBufferCount = vertexUniformBufferCount;
+    wgpu_cmd_buf->currentGraphicsPipeline->fragUniformBufferCount = fragUniformBufferCount;
 
     // Bind the pipeline
-    wgpuRenderPassEncoderSetPipeline(wgpuCmdBuf->renderPassEncoder, pipeline->pipeline);
+    wgpuRenderPassEncoderSetPipeline(wgpu_cmd_buf->renderPassEncoder, pipeline->pipeline);
 
     // Mark resources as clean
-    wgpuCmdBuf->resourcesDirty = false;
+    /*wgpu_cmd_buf->resourcesDirty = false;*/
 }
 
 static void WebGPU_INTERNAL_SetBindGroups(SDL_GPUCommandBuffer *commandBuffer)
 {
-    WebGPUCommandBuffer *wgpuCmdBuf = (WebGPUCommandBuffer *)commandBuffer;
-    WebGPUGraphicsPipeline *pipeline = wgpuCmdBuf->currentGraphicsPipeline;
+    WebGPUCommandBuffer *wgpu_cmd_buf = (WebGPUCommandBuffer *)commandBuffer;
+    WebGPUGraphicsPipeline *pipeline = wgpu_cmd_buf->currentGraphicsPipeline;
 
     // If we have a current graphics pipeline, we need to check if we have bind groups to set
     // If so, we need to set them before we begin the render pass
 
     // If we have uniform buffers loaded but no entries loaded, we need to find the uniform buffer entries and set them
     if (pipeline != NULL) {
-        Uint32 numBindGroups = wgpuCmdBuf->bindGroupCount;
-        WebGPUBindGroup *cmdBindGroups = wgpuCmdBuf->bindGroups;
-        WebGPUPipelineResourceLayout *resourceLayout = wgpuCmdBuf->currentGraphicsPipeline->resourceLayout;
+        Uint32 numBindGroups = wgpu_cmd_buf->bindGroupCount;
+        WebGPUBindGroup *cmdBindGroups = wgpu_cmd_buf->bindGroups;
+        WebGPUPipelineResourceLayout *resourceLayout = wgpu_cmd_buf->currentGraphicsPipeline->resourceLayout;
 
         // Check if we need to cycle the bind groups (if any of the bindings have changed or first load)
         if (numBindGroups != 0 && pipeline->cycleBindGroups == true) {
@@ -3727,7 +3746,7 @@ static void WebGPU_INTERNAL_SetBindGroups(SDL_GPUCommandBuffer *commandBuffer)
 
                 pipeline->bindGroups[i].entryCount = bindGroupDesc.entryCount;
                 // Assign the bind group to the pipeline so that we can reuse it without recreating it.
-                pipeline->bindGroups[i].bindGroup = wgpuDeviceCreateBindGroup(wgpuCmdBuf->renderer->device, &bindGroupDesc);
+                pipeline->bindGroups[i].bindGroup = wgpuDeviceCreateBindGroup(wgpu_cmd_buf->renderer->device, &bindGroupDesc);
 
                 SDL_Log("Created bind group %u, expecting %zu entries", i, pipeline->bindGroups[i].entryCount);
             }
@@ -3739,7 +3758,7 @@ static void WebGPU_INTERNAL_SetBindGroups(SDL_GPUCommandBuffer *commandBuffer)
         // Iterate over the pipeline bind groups and set them for the render pass
         for (Uint32 i = 0; i < numBindGroups; i += 1) {
             Uint32 group = resourceLayout->bindGroupLayouts[i].group;
-            wgpuRenderPassEncoderSetBindGroup(wgpuCmdBuf->renderPassEncoder, group, pipeline->bindGroups[i].bindGroup, 0, 0);
+            wgpuRenderPassEncoderSetBindGroup(wgpu_cmd_buf->renderPassEncoder, group, pipeline->bindGroups[i].bindGroup, 0, 0);
         }
     }
 }
@@ -3751,9 +3770,9 @@ static void WebGPU_DrawPrimitives(
     Uint32 firstVertex,
     Uint32 firstInstance)
 {
-    WebGPUCommandBuffer *wgpuCmdBuf = (WebGPUCommandBuffer *)commandBuffer;
+    WebGPUCommandBuffer *wgpu_cmd_buf = (WebGPUCommandBuffer *)commandBuffer;
     WebGPU_INTERNAL_SetBindGroups(commandBuffer);
-    wgpuRenderPassEncoderDraw(wgpuCmdBuf->renderPassEncoder, vertexCount, instanceCount, firstVertex, firstInstance);
+    wgpuRenderPassEncoderDraw(wgpu_cmd_buf->renderPassEncoder, vertexCount, instanceCount, firstVertex, firstInstance);
 }
 
 static void WebGPU_DrawIndexedPrimitives(
@@ -3764,10 +3783,311 @@ static void WebGPU_DrawIndexedPrimitives(
     Sint32 vertexOffset,
     Uint32 firstInstance)
 {
-    WebGPUCommandBuffer *wgpuCmdBuf = (WebGPUCommandBuffer *)commandBuffer;
+    WebGPUCommandBuffer *wgpu_cmd_buf = (WebGPUCommandBuffer *)commandBuffer;
     WebGPU_INTERNAL_SetBindGroups(commandBuffer);
-    wgpuRenderPassEncoderDrawIndexed(wgpuCmdBuf->renderPassEncoder, numIndices, numInstances, firstIndex, vertexOffset, firstInstance);
+    wgpuRenderPassEncoderDrawIndexed(wgpu_cmd_buf->renderPassEncoder, numIndices, numInstances, firstIndex, vertexOffset, firstInstance);
 }
+
+// Blit Functionality Workaround
+// ---------------------------------------------------
+
+// Vertex shader WGSL
+static const char *blitVertexShader = R"(
+struct VertexOutput {
+    @builtin(position) position: vec4f,
+    @location(0) texCoord: vec2f,
+}
+
+@vertex
+fn main(@builtin(vertex_index) vertexIndex: u32) -> VertexOutput {
+    var pos = array(
+        vec2f(-1.0, -1.0),
+        vec2f( 3.0, -1.0),
+        vec2f(-1.0,  3.0)
+    );
+    var texCoord = array(
+        vec2f(0.0, 1.0),
+        vec2f(2.0, 1.0),
+        vec2f(0.0, -1.0)
+    );
+
+    var output: VertexOutput;
+    output.position = vec4f(pos[vertexIndex], 0.0, 1.0);
+    output.texCoord = texCoord[vertexIndex];
+    return output;
+}
+)";
+
+// Fragment shader WGSL
+static const char *blitFragmentShader = R"(
+
+    struct BlitParams {
+        layer: f32,
+        padding1: f32,
+        padding2: f32,
+        padding3: f32,
+    }
+
+    @group(0) @binding(0) var sourceTex: texture_3d<f32>;
+    @group(0) @binding(1) var texSampler: sampler;
+    @group(0) @binding(2) var<uniform> params: BlitParams;
+
+    @fragment
+    fn main(@location(0) texCoord: vec2f) -> @location(0) vec4f {
+        return textureSample(sourceTex, texSampler, vec3f(texCoord, params.layer));
+    }
+)";
+
+typedef struct
+{
+    float layer;
+    float padding[3];
+} BlitParams;
+
+// Pipeline creation and cache management
+static WGPUBindGroupLayout CreateBlitBindGroupLayout(WGPUDevice device)
+{
+    WGPUBindGroupLayoutEntry bindGroupLayoutEntries[] = {
+        {
+            .binding = 0,
+            .visibility = WGPUShaderStage_Fragment,
+            .texture.sampleType = WGPUTextureSampleType_Float,
+            .texture.viewDimension = WGPUTextureViewDimension_3D,
+        },
+        {
+            .binding = 1,
+            .visibility = WGPUShaderStage_Fragment,
+            .sampler.type = WGPUSamplerBindingType_Filtering,
+        },
+        {
+            .binding = 2,
+            .visibility = WGPUShaderStage_Fragment,
+            .buffer.type = WGPUBufferBindingType_Uniform,
+            .buffer.minBindingSize = sizeof(BlitParams),
+        }
+    };
+
+    WGPUBindGroupLayoutDescriptor bindGroupLayoutDesc = {
+        .entryCount = SDL_arraysize(bindGroupLayoutEntries),
+        .entries = bindGroupLayoutEntries,
+        .label = "Blit Bind Group Layout"
+    };
+
+    return wgpuDeviceCreateBindGroupLayout(device, &bindGroupLayoutDesc);
+}
+
+void WebGPU_INTERNAL_CreateBlitCache(WebGPURenderer *renderer, WGPUTextureFormat dstFormat)
+{
+    WGPUDevice device = renderer->device;
+
+    // Create pipeline layout if not cached
+    if (!renderer->blitCache.bindGroupLayout) {
+        renderer->blitCache.bindGroupLayout = CreateBlitBindGroupLayout(device);
+    }
+
+    if (!renderer->blitCache.pipelineLayout) {
+        WGPUPipelineLayoutDescriptor pipelineLayoutDesc = {
+            .bindGroupLayoutCount = 1,
+            .bindGroupLayouts = &renderer->blitCache.bindGroupLayout,
+            .label = "Blit Pipeline Layout"
+        };
+        renderer->blitCache.pipelineLayout = wgpuDeviceCreatePipelineLayout(device, &pipelineLayoutDesc);
+    }
+
+    // Create pipeline
+    WGPUColorTargetState colorTarget = {
+        .format = dstFormat,
+        .blend = &(WGPUBlendState){
+            .color = {
+                .operation = WGPUBlendOperation_Add,
+                .srcFactor = WGPUBlendFactor_One,
+                .dstFactor = WGPUBlendFactor_Zero,
+            },
+            .alpha = {
+                .operation = WGPUBlendOperation_Add,
+                .srcFactor = WGPUBlendFactor_One,
+                .dstFactor = WGPUBlendFactor_Zero,
+            } },
+        .writeMask = WGPUColorWriteMask_All,
+    };
+
+    WGPURenderPipelineDescriptor pipelineDesc = {
+        .layout = renderer->blitCache.pipelineLayout,
+        .vertex = {
+            .module = renderer->blitCache.vertexModule,
+            .entryPoint = "main",
+            .bufferCount = 0,
+        },
+        .fragment = &(WGPUFragmentState){
+            .module = renderer->blitCache.fragmentModule,
+            .entryPoint = "main",
+            .targetCount = 1,
+            .targets = &colorTarget,
+        },
+        .primitive = {
+            .topology = WGPUPrimitiveTopology_TriangleList,
+            .cullMode = WGPUCullMode_None,
+        },
+        .multisample = {
+            .count = 1,
+            .mask = 0xFFFFFFFF,
+            .alphaToCoverageEnabled = false,
+        },
+        .label = "Blit Pipeline"
+    };
+
+    renderer->blitCache.blitPipeline = wgpuDeviceCreateRenderPipeline(device, &pipelineDesc);
+
+    // Create samplers
+    if (!renderer->blitCache.nearestSampler) {
+        WGPUSamplerDescriptor samplerDesc = {
+            .label = "Nearest Sampler",
+            .addressModeU = WGPUAddressMode_ClampToEdge,
+            .addressModeV = WGPUAddressMode_ClampToEdge,
+            .addressModeW = WGPUAddressMode_ClampToEdge,
+            .magFilter = WGPUFilterMode_Nearest,
+            .minFilter = WGPUFilterMode_Nearest,
+            .mipmapFilter = WGPUMipmapFilterMode_Nearest,
+            .lodMinClamp = 0.0f,
+            .lodMaxClamp = 0.0f,
+            .compare = WGPUCompareFunction_Undefined,
+            .maxAnisotropy = 1,
+        };
+        renderer->blitCache.nearestSampler = wgpuDeviceCreateSampler(device, &samplerDesc);
+    }
+
+    if (!renderer->blitCache.linearSampler) {
+        WGPUSamplerDescriptor samplerDesc = {
+            .label = "Linear Sampler",
+            .addressModeU = WGPUAddressMode_ClampToEdge,
+            .addressModeV = WGPUAddressMode_ClampToEdge,
+            .addressModeW = WGPUAddressMode_ClampToEdge,
+            .magFilter = WGPUFilterMode_Linear,
+            .minFilter = WGPUFilterMode_Linear,
+            .mipmapFilter = WGPUMipmapFilterMode_Linear,
+            .lodMinClamp = 0.0f,
+            .lodMaxClamp = 0.0f,
+            .compare = WGPUCompareFunction_Undefined,
+            .maxAnisotropy = 1,
+        };
+        renderer->blitCache.linearSampler = wgpuDeviceCreateSampler(device, &samplerDesc);
+    }
+
+    renderer->blitCache.uniformBuffer = wgpuDeviceCreateBuffer(device, &(WGPUBufferDescriptor){
+                                                                           .size = sizeof(BlitParams),
+                                                                           .usage = WGPUBufferUsage_Uniform | WGPUBufferUsage_CopyDst | WGPUBufferUsage_CopySrc,
+                                                                           .mappedAtCreation = false,
+                                                                       });
+}
+
+// Custom blitting operation to mimic SDL3's vkCmdBlitImage functionality
+static void WebGPU_Blit(SDL_GPUCommandBuffer *commandBuffer, const SDL_GPUBlitInfo *info)
+{
+    if (!commandBuffer || !info) {
+        return;
+    }
+
+    WebGPUCommandBuffer *wgpu_cmd_buf = (WebGPUCommandBuffer *)commandBuffer;
+    const SDL_GPUBlitRegion *src_region = &info->source;
+    const SDL_GPUBlitRegion *dst_region = &info->destination;
+    WebGPUTexture *src_texture = (WebGPUTexture *)src_region->texture;
+    WebGPUTexture *dst_texture = (WebGPUTexture *)dst_region->texture;
+    WGPUTextureFormat src_format = SDLToWGPUTextureFormat(src_texture->format);
+    WGPUTextureFormat dst_format = SDLToWGPUTextureFormat(dst_texture->format);
+
+    // If there is no blit pipeline cached, create it
+    if (wgpu_cmd_buf->renderer->blitCache.blitPipeline == NULL) {
+        WebGPU_INTERNAL_CreateBlitCache(wgpu_cmd_buf->renderer, dst_format);
+    }
+
+    WGPURenderPipeline blitPipeline = wgpu_cmd_buf->renderer->blitCache.blitPipeline;
+
+    // Create source texture view if needed (use existing fullView if possible)
+    WGPUTextureView sourceView = src_texture->fullView;
+
+    // Normalize layer to 0-1 range for 3D textures
+    float layer = (float)src_region->layer_or_depth_plane / (float)src_texture->layerCount;
+
+    // Create uniform buffer for layer/depth information
+    BlitParams params = {
+        .layer = layer,
+        .padding = { 0.0f, 0.0f, 0.0f },
+    };
+
+    wgpuQueueWriteBuffer(wgpu_cmd_buf->renderer->queue, wgpu_cmd_buf->renderer->blitCache.uniformBuffer, 0, &params, sizeof(BlitParams));
+
+    WGPUBindGroupEntry entries[] = {
+        {
+            .binding = 0,
+            .textureView = sourceView,
+        },
+        {
+            .binding = 1,
+            .sampler = info->filter == SDL_GPU_FILTER_LINEAR ? wgpu_cmd_buf->renderer->blitCache.linearSampler : wgpu_cmd_buf->renderer->blitCache.nearestSampler,
+        },
+        {
+            .binding = 2,
+            .buffer = wgpu_cmd_buf->renderer->blitCache.uniformBuffer,
+            .offset = 0,
+            .size = sizeof(BlitParams),
+        },
+    };
+
+    // Create bind group
+    WGPUBindGroup bindGroup = wgpuDeviceCreateBindGroup(wgpu_cmd_buf->renderer->device, &(WGPUBindGroupDescriptor){
+                                                                                            .layout = wgpuRenderPipelineGetBindGroupLayout(blitPipeline, 0),
+                                                                                            .entries = entries,
+                                                                                            .entryCount = SDL_arraysize(entries),
+                                                                                        });
+
+    // Begin render pass
+    WGPURenderPassColorAttachment colorAttachment = {
+        .view = dst_texture->fullView,
+        .loadOp = info->load_op == SDL_GPU_LOADOP_LOAD ? WGPULoadOp_Load : WGPULoadOp_Clear,
+        .storeOp = WGPUStoreOp_Store,
+        .depthSlice = ~0u,
+    };
+
+    WGPURenderPassDescriptor renderPassDesc = {
+        .colorAttachmentCount = 1,
+        .colorAttachments = &colorAttachment,
+        .label = "SDL3 WebGPU Blit Render Pass",
+    };
+
+    WGPUCommandEncoder cmd_encoder = wgpuDeviceCreateCommandEncoder(wgpu_cmd_buf->renderer->device, NULL);
+    WGPURenderPassEncoder render_pass = wgpuCommandEncoderBeginRenderPass(cmd_encoder, &renderPassDesc);
+
+    // Set viewport and scissor based on destination region
+    wgpuRenderPassEncoderSetViewport(
+        render_pass,
+        dst_region->x, dst_region->y,
+        dst_region->w, dst_region->h,
+        0.0f, 1.0f);
+
+    wgpuRenderPassEncoderSetScissorRect(
+        render_pass,
+        dst_region->x, dst_region->y,
+        dst_region->w, dst_region->h);
+
+    // Set pipeline and bind group
+    wgpuRenderPassEncoderSetPipeline(render_pass, blitPipeline);
+    wgpuRenderPassEncoderSetBindGroup(render_pass, 0, bindGroup, 0, NULL);
+
+    // Draw fullscreen triangle
+    wgpuRenderPassEncoderDraw(render_pass, 3, 1, 0, 0);
+    wgpuRenderPassEncoderEnd(render_pass);
+
+    // Submit command buffer
+    WGPUCommandBuffer cmd_buffer = wgpuCommandEncoderFinish(cmd_encoder, NULL);
+    wgpuQueueSubmit(wgpu_cmd_buf->renderer->queue, 1, &cmd_buffer);
+    wgpuCommandBufferRelease(cmd_buffer);
+    wgpuCommandEncoderRelease(cmd_encoder);
+
+    // Cleanup
+    wgpuBindGroupRelease(bindGroup);
+}
+
+// ---------------------------------------------------
 
 static bool WebGPU_PrepareDriver(SDL_VideoDevice *_this)
 {
@@ -3836,7 +4156,30 @@ static SDL_GPUDevice *WebGPU_CreateDevice(bool debug, bool preferLowPower, SDL_P
     // Acquire the queue from the device
     renderer->queue = wgpuDeviceGetQueue(renderer->device);
 
-    /*SDL_SetHint(SDL_HINT_EMSCRIPTEN_ASYNCIFY, "1");*/
+    // Initialize the blit cache
+    renderer->blitCache.blitPipeline = NULL;
+    renderer->blitCache.bindGroupLayout = NULL;
+    renderer->blitCache.pipelineLayout = NULL;
+    renderer->blitCache.bindGroup = NULL;
+    renderer->blitCache.uniformBuffer = NULL;
+    renderer->blitCache.nearestSampler = NULL;
+    renderer->blitCache.linearSampler = NULL;
+    renderer->blitCache.vertexModule = wgpuDeviceCreateShaderModule(renderer->device, &(WGPUShaderModuleDescriptor){
+                                                                                          .nextInChain = (WGPUChainedStruct *)&(WGPUShaderModuleWGSLDescriptor){
+                                                                                              .code = blitVertexShader,
+                                                                                              .chain = {
+                                                                                                  .sType = WGPUSType_ShaderModuleWGSLDescriptor,
+                                                                                              },
+                                                                                          },
+                                                                                      });
+    renderer->blitCache.fragmentModule = wgpuDeviceCreateShaderModule(renderer->device, &(WGPUShaderModuleDescriptor){
+                                                                                            .nextInChain = (WGPUChainedStruct *)&(WGPUShaderModuleWGSLDescriptor){
+                                                                                                .code = blitFragmentShader,
+                                                                                                .chain = {
+                                                                                                    .sType = WGPUSType_ShaderModuleWGSLDescriptor,
+                                                                                                },
+                                                                                            },
+                                                                                        });
 
     result = (SDL_GPUDevice *)SDL_malloc(sizeof(SDL_GPUDevice));
 
