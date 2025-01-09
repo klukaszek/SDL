@@ -373,7 +373,7 @@ typedef struct WebGPUCommandBuffer
     WebGPURect currentScissor;
 
     // Used to track layer views that need to be released when the command buffer is destroyed
-    WGPUTextureView *layerViews;
+    WGPUTextureView layerViews[32];
     Uint32 layerViewCount;
 
     /*WebGPUGraphicsPipeline **usedGraphicsPipelines;*/
@@ -1662,7 +1662,7 @@ static void WebGPU_INTERNAL_BindSamplers(SDL_GPUCommandBuffer *commandBuffer,
         return;
     }
 
-    void **pointers = SDL_malloc(sizeof(void *) * numBindings * 2);
+    void **pointers = SDL_stack_alloc(void*, numBindings * 2);
     if (pointers == NULL) {
         SDL_OutOfMemory();
         return;
@@ -1745,6 +1745,8 @@ static void WebGPU_INTERNAL_BindSamplers(SDL_GPUCommandBuffer *commandBuffer,
             }
         }
     }
+
+    SDL_stack_free(pointers);
 }
 
 static void WebGPU_BindVertexSamplers(SDL_GPUCommandBuffer *commandBuffer,
@@ -1996,16 +1998,17 @@ static SDL_GPUCommandBuffer *WebGPU_AcquireCommandBuffer(SDL_GPURenderer *driver
 {
     WebGPURenderer *renderer = (WebGPURenderer *)driverData;
     WebGPUCommandBuffer *commandBuffer = SDL_malloc(sizeof(WebGPUCommandBuffer));
-    memset(commandBuffer, '\0', sizeof(WebGPUCommandBuffer));
+    SDL_zero(*commandBuffer);
     commandBuffer->renderer = renderer;
+    commandBuffer->common.device = renderer->sdlDevice;
+
     int width, height;
-    width = renderer->claimedWindows[0]->window->w;
-    height = renderer->claimedWindows[0]->window->h;
+    SDL_GetWindowSize(renderer->claimedWindows[0]->window, &width, &height);
     commandBuffer->currentViewport = (WebGPUViewport){ 0, 0, width, height, 0.0, 1.0 };
     commandBuffer->currentScissor = (WebGPURect){ 0, 0, width, height };
-    commandBuffer->layerViews = SDL_malloc(sizeof(WGPUTextureView) * 32);
+
+    SDL_zero(commandBuffer->layerViews);
     commandBuffer->layerViewCount = 0;
-    commandBuffer->common.device = renderer->sdlDevice;
 
     WGPUCommandEncoderDescriptor commandEncoderDesc = {
         .label = "SDL_GPU Command Encoder",
@@ -2140,7 +2143,7 @@ void WebGPU_BeginRenderPass(SDL_GPUCommandBuffer *commandBuffer,
     }
 
     WGPURenderPassColorAttachment *colorAttachments =
-        SDL_malloc(sizeof(WGPURenderPassColorAttachment) * colorAttachmentCount);
+        SDL_stack_alloc(WGPURenderPassColorAttachment, colorAttachmentCount);
     if (!colorAttachments) {
         SDL_OutOfMemory();
         return;
@@ -2208,7 +2211,7 @@ void WebGPU_BeginRenderPass(SDL_GPUCommandBuffer *commandBuffer,
         .in_progress = true,
     };
 
-    SDL_free(colorAttachments);
+    SDL_stack_free(colorAttachments);
 }
 
 static void WebGPU_EndRenderPass(SDL_GPUCommandBuffer *commandBuffer)
@@ -2764,7 +2767,7 @@ static WGPUVertexBufferLayout *WebGPU_INTERNAL_CreateVertexBufferLayouts(const S
     }
 
     // Allocate memory for the vertex attributes
-    WGPUVertexAttribute *attributes = SDL_malloc(sizeof(WGPUVertexAttribute) * vertexInputState->num_vertex_attributes);
+    WGPUVertexAttribute *attributes = SDL_stack_alloc(WGPUVertexAttribute, vertexInputState->num_vertex_attributes);
     if (attributes == NULL) {
         SDL_OutOfMemory();
         return NULL;
@@ -2828,7 +2831,7 @@ static WGPUVertexBufferLayout *WebGPU_INTERNAL_CreateVertexBufferLayouts(const S
     }
 
     // Free the initial attributes array
-    SDL_free(attributes);
+    SDL_stack_free(attributes);
 
     // Return a pointer to the head of the vertex buffer layouts
     return vertexBufferLayouts;
@@ -2985,12 +2988,12 @@ static WebGPUPipelineResourceLayout *WebGPU_INTERNAL_CreatePipelineResourceLayou
     }
 
     // We need to iterate through our resource layout bind group layouts and create the WGPUBindGroupLayouts using LayoutEntries and BindGroupLayoutDescriptors
-    WGPUBindGroupLayout *layouts = SDL_malloc(sizeof(WGPUBindGroupLayout) * bindGroupCount);
+    WGPUBindGroupLayout *layouts = SDL_stack_alloc(WGPUBindGroupLayout, bindGroupCount);
     for (Uint32 i = 0; i < bindGroupCount; i += 1) {
         WebGPUBindGroupLayout *layout = &resourceLayout->bindGroupLayouts[i];
 
         // Store layout entries for the bind group layout
-        WGPUBindGroupLayoutEntry *layoutEntries = SDL_malloc(sizeof(WGPUBindGroupLayoutEntry) * layout->bindingCount);
+        WGPUBindGroupLayoutEntry *layoutEntries = SDL_stack_alloc(WGPUBindGroupLayoutEntry, layout->bindingCount);
         WGPUBindGroupLayoutDescriptor bindGroupLayoutDesc = {
             .label = "SDL_GPU WebGPU Bind Group Layout",
             .entryCount = layout->bindingCount,
@@ -3069,7 +3072,7 @@ static WebGPUPipelineResourceLayout *WebGPU_INTERNAL_CreatePipelineResourceLayou
 
     // Release any allocated memory that is no longer needed
     SDL_free(pipelineBindings);
-    SDL_free(layouts);
+    SDL_stack_free(layouts);
 
     return resourceLayout;
 }
@@ -3135,7 +3138,7 @@ static SDL_GPUGraphicsPipeline *WebGPU_CreateGraphicsPipeline(
 
     // Build the color targets for the render pipeline'
     const SDL_GPUGraphicsPipelineTargetInfo *targetInfo = &pipelineCreateInfo->target_info;
-    WGPUColorTargetState *colorTargets = SDL_malloc(sizeof(WGPUColorTargetState) * targetInfo->num_color_targets);
+    WGPUColorTargetState *colorTargets = SDL_stack_alloc(WGPUColorTargetState, targetInfo->num_color_targets);
     for (Uint32 i = 0; i < targetInfo->num_color_targets; i += 1) {
         const SDL_GPUColorTargetDescription *colorAttachment = &targetInfo->color_target_descriptions[i];
         SDL_GPUColorTargetBlendState blendState = colorAttachment->blend_state;
@@ -3238,7 +3241,7 @@ static SDL_GPUGraphicsPipeline *WebGPU_CreateGraphicsPipeline(
     SDL_SetAtomicInt(&pipeline->referenceCount, 0);
 
     // Clean up
-    SDL_free(colorTargets);
+    SDL_stack_free(colorTargets);
 
     // Iterate through the VertexBufferLayouts and free the attributes, then free the layout.
     // This can be done since everything has already been copied to the final render pipeline.
@@ -3452,7 +3455,7 @@ static void WebGPU_UploadToTexture(SDL_GPUCommandBuffer *commandBuffer,
         .origin = (WGPUOrigin3D){
             .x = destination->x,
             .y = destination->y,
-            .z = destination->layer,    // layer index we are looking to transfer to
+            .z = destination->layer, // layer index we are looking to transfer to
         },
         .aspect = WGPUTextureAspect_All,
     };
@@ -3984,7 +3987,6 @@ static void WebGPU_INTERNAL_InitBlitResources(
     WebGPURenderer *renderer)
 {
     SDL_GPUShaderCreateInfo shaderCreateInfo;
-    SDL_GPUSamplerCreateInfo samplerCreateInfo;
 
     SDL_Log("Initializing WebGPU blit resources");
 
@@ -4104,35 +4106,35 @@ static void WebGPU_INTERNAL_InitBlitResources(
     WebGPU_SetShaderLabel((SDL_GPURenderer *)renderer, renderer->blitFromCubeArrayShader, "BlitFromCubeArray");
 
     // Create samplers
-    samplerCreateInfo.address_mode_u = SDL_GPU_SAMPLERADDRESSMODE_CLAMP_TO_EDGE;
-    samplerCreateInfo.address_mode_v = SDL_GPU_SAMPLERADDRESSMODE_CLAMP_TO_EDGE;
-    samplerCreateInfo.address_mode_w = SDL_GPU_SAMPLERADDRESSMODE_CLAMP_TO_EDGE;
-    samplerCreateInfo.enable_anisotropy = 0;
-    samplerCreateInfo.enable_compare = 0;
-    samplerCreateInfo.mag_filter = SDL_GPU_FILTER_NEAREST;
-    samplerCreateInfo.min_filter = SDL_GPU_FILTER_NEAREST;
-    samplerCreateInfo.mipmap_mode = SDL_GPU_SAMPLERMIPMAPMODE_NEAREST;
-    samplerCreateInfo.mip_lod_bias = 0.0f;
-    samplerCreateInfo.min_lod = 0;
-    samplerCreateInfo.max_lod = 1000;
-    samplerCreateInfo.max_anisotropy = 1.0f;
-    samplerCreateInfo.compare_op = SDL_GPU_COMPAREOP_INVALID;
+    SDL_GPUSamplerCreateInfo nearestCreateInfo = (SDL_GPUSamplerCreateInfo){
+        .min_filter = SDL_GPU_FILTER_NEAREST,
+        .mag_filter = SDL_GPU_FILTER_NEAREST,
+        .mipmap_mode = SDL_GPU_SAMPLERMIPMAPMODE_NEAREST,
+        .address_mode_u = SDL_GPU_SAMPLERADDRESSMODE_CLAMP_TO_EDGE,
+        .address_mode_v = SDL_GPU_SAMPLERADDRESSMODE_CLAMP_TO_EDGE,
+        .address_mode_w = SDL_GPU_SAMPLERADDRESSMODE_CLAMP_TO_EDGE,
+    };
 
     renderer->blitNearestSampler = WebGPU_CreateSampler(
         (SDL_GPURenderer *)renderer,
-        &samplerCreateInfo);
+        &nearestCreateInfo);
 
     if (renderer->blitNearestSampler == NULL) {
         SDL_LogError(SDL_LOG_CATEGORY_GPU, "Failed to create blit nearest sampler!");
     }
 
-    samplerCreateInfo.mag_filter = SDL_GPU_FILTER_LINEAR;
-    samplerCreateInfo.min_filter = SDL_GPU_FILTER_LINEAR;
-    samplerCreateInfo.mipmap_mode = SDL_GPU_SAMPLERMIPMAPMODE_LINEAR;
+    SDL_GPUSamplerCreateInfo linearCreateInfo = (SDL_GPUSamplerCreateInfo){
+        .min_filter = SDL_GPU_FILTER_LINEAR,
+        .mag_filter = SDL_GPU_FILTER_LINEAR,
+        .mipmap_mode = SDL_GPU_SAMPLERMIPMAPMODE_LINEAR,
+        .address_mode_u = SDL_GPU_SAMPLERADDRESSMODE_CLAMP_TO_EDGE,
+        .address_mode_v = SDL_GPU_SAMPLERADDRESSMODE_CLAMP_TO_EDGE,
+        .address_mode_w = SDL_GPU_SAMPLERADDRESSMODE_CLAMP_TO_EDGE,
+    };
 
     renderer->blitLinearSampler = WebGPU_CreateSampler(
         (SDL_GPURenderer *)renderer,
-        &samplerCreateInfo);
+        &linearCreateInfo);
 
     if (renderer->blitLinearSampler == NULL) {
         SDL_LogError(SDL_LOG_CATEGORY_GPU, "Failed to create blit linear sampler!");
