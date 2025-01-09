@@ -13,9 +13,11 @@
 #include <SDL3/SDL_hints.h>
 #include <SDL3/SDL_mutex.h>
 #include <SDL3/SDL_oldnames.h>
+#include <SDL3/SDL_pixels.h>
 #include <SDL3/SDL_properties.h>
 #include <SDL3/SDL_render.h>
 #include <SDL3/SDL_stdinc.h>
+#include <SDL3/SDL_video.h>
 #include <emscripten/emscripten.h>
 #include <emscripten/html5.h>
 #include <regex.h>
@@ -388,6 +390,7 @@ typedef struct WebGPURenderer
     bool preferLowPower;
 
     SDL_GPUDevice *sdlDevice;
+    SDL_PixelFormat pixelFormat;
 
     WGPUInstance instance;
     WGPUAdapter adapter;
@@ -441,6 +444,8 @@ static WGPULoadOp SDLToWGPULoadOp(SDL_GPULoadOp loadOp)
     case SDL_GPU_LOADOP_LOAD:
         return WGPULoadOp_Load;
     case SDL_GPU_LOADOP_CLEAR:
+        return WGPULoadOp_Clear;
+    case SDL_GPU_LOADOP_DONT_CARE:
         return WGPULoadOp_Clear;
     default:
         return WGPULoadOp_Clear;
@@ -3424,12 +3429,19 @@ static void WebGPU_UploadToTexture(SDL_GPUCommandBuffer *commandBuffer,
     }
 
     WebGPUCommandBuffer *wgpu_cmd_buf = (WebGPUCommandBuffer *)commandBuffer;
+    WebGPURenderer *renderer = (WebGPURenderer *)wgpu_cmd_buf->renderer;
     WebGPUTexture *webgpuTexture = (WebGPUTexture *)destination->texture;
     WebGPUBuffer *transfer_buffer = (WebGPUBuffer *)source->transfer_buffer;
 
+    // TODO: Set up some HDR compatibility checks here
+    // For now we'll just take the PixelFormat that SDL gives us;
+    if (renderer->pixelFormat == SDL_PIXELFORMAT_UNKNOWN) {
+        renderer->pixelFormat = SDL_GetWindowPixelFormat(renderer->claimedWindows[0]->window);
+    }
+
     WGPUTextureDataLayout dataLayout = {
         .offset = source->offset,
-        .bytesPerRow = destination->w * 4, // 4 bytes per RGBA8 pixel
+        .bytesPerRow = destination->w * SDL_GetPixelFormatDetails(wgpu_cmd_buf->renderer->pixelFormat)->bytes_per_pixel,
         .rowsPerImage = destination->h,
     };
 
@@ -3440,7 +3452,7 @@ static void WebGPU_UploadToTexture(SDL_GPUCommandBuffer *commandBuffer,
         .origin = (WGPUOrigin3D){
             .x = destination->x,
             .y = destination->y,
-            .z = destination->z,
+            .z = destination->layer,    // layer index we are looking to transfer to
         },
         .aspect = WGPUTextureAspect_All,
     };
@@ -3448,13 +3460,11 @@ static void WebGPU_UploadToTexture(SDL_GPUCommandBuffer *commandBuffer,
     WGPUExtent3D extent = {
         .width = destination->w,
         .height = destination->h,
-        .depthOrArrayLayers = destination->d,
+        .depthOrArrayLayers = destination->d, // total "depth" of texture
     };
 
-    SDL_Log("Copy Texture depthOrArrayLayers: %u", extent.depthOrArrayLayers);
-
     wgpuQueueWriteTexture(
-        wgpu_cmd_buf->renderer->queue,
+        renderer->queue,
         &copyTexture,
         transfer_buffer->mappedData,
         transfer_buffer->size, // Make sure this matches exactly what we need
@@ -4216,9 +4226,8 @@ static void WebGPU_DestroyDevice(SDL_GPUDevice *device)
 
     /*// Destroy the device*/
     wgpuDeviceDestroy(renderer->device);
-
-    wgpuAdapterRelease(renderer->adapter);
     wgpuInstanceRelease(renderer->instance);
+    wgpuAdapterRelease(renderer->adapter);
 
     // Free the renderer
     SDL_free(renderer);
