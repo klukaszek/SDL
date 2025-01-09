@@ -20,6 +20,7 @@
 */
 #include "SDL_internal.h"
 #include "SDL_sysgpu.h"
+#include <SDL3/SDL_gpu.h>
 
 // FIXME: This could probably use SDL_ObjectValid
 #define CHECK_DEVICE_MAGIC(device, retval)  \
@@ -195,6 +196,7 @@ SDL_GPUGraphicsPipeline *SDL_GPU_FetchBlitPipeline(
     SDL_GPUGraphicsPipeline *pipeline;
 
     if (blit_pipeline_count == NULL) {
+        SDL_Log("blit_pipeline_count is NULL");
         // use pre-created, format-agnostic pipelines
         return (*blit_pipelines)[source_texture_type].pipeline;
     }
@@ -316,6 +318,7 @@ void SDL_GPU_BlitCommon(
         &color_target_info,
         1,
         NULL);
+
 
     viewport.x = (float)info->destination.x;
     viewport.y = (float)info->destination.y;
@@ -832,6 +835,8 @@ SDL_GPUGraphicsPipeline *SDL_CreateGPUGraphicsPipeline(
             CHECK_STENCILOP_ENUM_INVALID(stencil_state->depth_fail_op, NULL)
         }
     }
+
+    SDL_Log("Creating graphics pipeline");
 
     return device->CreateGraphicsPipeline(
         device->driverData,
