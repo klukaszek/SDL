@@ -189,6 +189,7 @@ typedef struct WebGPUBindingInfo
     unsigned int binding;
     WebGPUBindingType type;
     WebGPUShaderStage stage;
+    WGPUTextureViewDimension viewDimension;
 } WebGPUBindingInfo;
 
 typedef struct WebGPUBindGroupLayout
@@ -381,23 +382,12 @@ typedef struct WebGPUCommandBuffer
 
 } WebGPUCommandBuffer;
 
-typedef struct BlitPipelineCache
-{
-    WGPUShaderModule vertexModule;
-    WGPUShaderModule fragmentModule;
-    WGPURenderPipeline blitPipeline;
-    WGPUBindGroupLayout bindGroupLayout;
-    WGPUPipelineLayout pipelineLayout;
-    WGPUBindGroup bindGroup;
-    WGPUBuffer uniformBuffer;
-    WGPUSampler nearestSampler;
-    WGPUSampler linearSampler;
-} BlitPipelineCache;
-
 typedef struct WebGPURenderer
 {
-    bool debugMode;
+    bool debug;
     bool preferLowPower;
+
+    SDL_GPUDevice *sdlDevice;
 
     WGPUInstance instance;
     WGPUAdapter adapter;
@@ -408,79 +398,24 @@ typedef struct WebGPURenderer
     Uint32 claimedWindowCount;
     Uint32 claimedWindowCapacity;
 
-    BlitPipelineCache blitCache;
+    // Blit
+    SDL_GPUShader *blitVertexShader;
+    SDL_GPUShader *blitFrom2DShader;
+    SDL_GPUShader *blitFrom2DArrayShader;
+    SDL_GPUShader *blitFrom3DShader;
+    SDL_GPUShader *blitFromCubeShader;
+    SDL_GPUShader *blitFromCubeArrayShader;
+
+    SDL_GPUSampler *blitNearestSampler;
+    SDL_GPUSampler *blitLinearSampler;
+
+    BlitPipelineCacheEntry *blitPipelines;
+    Uint32 blitPipelineCount;
+    Uint32 blitPipelineCapacity;
+
 } WebGPURenderer;
 
 // ---------------------------------------------------
-
-void WebGPU_INTERNAL_InitializeBlitCache(WebGPURenderer *renderer);
-
-// Shader Reflection Functions
-// ---------------------------------------------------
-static WebGPUBindingType DetectBindingType(const char *line)
-{
-    if (SDL_strstr(line, "buffer") != NULL) {
-        return WGPUBindingType_Buffer;
-    } else if (SDL_strstr(line, "uniform") != NULL) {
-        return WGPUBindingType_UniformBuffer;
-    } else if (SDL_strstr(line, "sampler") != NULL) {
-        return WGPUBindingType_Sampler;
-    } else if (SDL_strstr(line, "texture") != NULL) {
-        return WGPUBindingType_Texture;
-    } else {
-        return WGPUBindingType_Undefined;
-    }
-}
-
-static WebGPUBindingInfo *ExtractBindingsFromShader(const char *shaderCode, Uint32 *outBindingCount, WebGPUShaderStage stage)
-{
-
-    // Iterate through each line of the shader code and extract the group and binding numbers when the pattern is found
-    // The pattern is "@group(<group number>) @binding(<binding number>)"
-    const char *pattern = "@group\\((\\d+)\\)\\s*@binding\\((\\d+)\\)";
-    regex_t regex;
-    regmatch_t matches[3]; // 0 is the entire match, 1 is group, 2 is binding
-
-    if (regcomp(&regex, pattern, REG_EXTENDED)) {
-        SDL_LogError(SDL_LOG_CATEGORY_ERROR, "Failed to compile regex pattern: %s", pattern);
-        return NULL;
-    }
-
-    // Allocate an initial array for bindings
-    int capacity = 10;
-    Uint32 count = 0;
-    WebGPUBindingInfo *bindings = (WebGPUBindingInfo *)SDL_malloc(capacity * sizeof(WebGPUBindingInfo));
-
-    // Iterate through each line of the shader code
-    char *line = strtok((char *)shaderCode, "\n");
-    do {
-        // Check if the line matches the pattern
-        if (regexec(&regex, line, 3, matches, 0) == 0) {
-            // Expand the array if needed
-            if (count >= capacity) {
-                capacity *= 2;
-                bindings = (WebGPUBindingInfo *)realloc(bindings, capacity * sizeof(WebGPUBindingInfo));
-            }
-            // Extract group and binding numbers
-            char groupStr[16] = { 0 };
-            char bindingStr[16] = { 0 };
-            strncpy(groupStr, line + matches[1].rm_so, matches[1].rm_eo - matches[1].rm_so);
-            strncpy(bindingStr, line + matches[2].rm_so, matches[2].rm_eo - matches[2].rm_so);
-
-            // Store the group, binding, and type
-            bindings[count].group = atoi(groupStr);
-            bindings[count].binding = atoi(bindingStr);
-            bindings[count].type = DetectBindingType(line);
-            bindings[count].stage = stage;
-            count++;
-        }
-    } while ((line = strtok(NULL, "\n")) != NULL);
-
-    regfree(&regex);
-
-    *outBindingCount = count;
-    return bindings;
-}
 
 // Conversion Functions:
 // ---------------------------------------------------
@@ -790,6 +725,28 @@ static WGPUTextureViewDimension SDLToWGPUTextureViewDimension(SDL_GPUTextureType
     default:
         SDL_Log("SDL_GPU: Invalid texture type %d. Using 2D.", type);
         return WGPUTextureViewDimension_2D;
+    }
+}
+
+const char *WebGPU_GetTextureViewDimensionString(WGPUTextureViewDimension dim)
+{
+    switch (dim) {
+    case WGPUTextureViewDimension_Undefined:
+        return "Undefined";
+    case WGPUTextureViewDimension_1D:
+        return "1D";
+    case WGPUTextureViewDimension_2D:
+        return "2D";
+    case WGPUTextureViewDimension_2DArray:
+        return "2DArray";
+    case WGPUTextureViewDimension_Cube:
+        return "Cube";
+    case WGPUTextureViewDimension_CubeArray:
+        return "CubeArray";
+    case WGPUTextureViewDimension_3D:
+        return "3D";
+    default:
+        return "Unknown";
     }
 }
 
@@ -1107,6 +1064,96 @@ static WGPUVertexFormat SDLToWGPUVertexFormat(SDL_GPUVertexElementFormat format)
         return WGPUVertexFormat_Undefined;
     }
 }
+
+// Shader Reflection Functions
+// ---------------------------------------------------
+
+static WebGPUBindingType DetectBindingType(const char *line, WGPUTextureViewDimension *viewDimension)
+{
+    if (SDL_strstr(line, "buffer") != NULL) {
+        return WGPUBindingType_Buffer;
+    } else if (SDL_strstr(line, "uniform") != NULL) {
+        return WGPUBindingType_UniformBuffer;
+    } else if (SDL_strstr(line, "sampler") != NULL) {
+        return WGPUBindingType_Sampler;
+    } else if (SDL_strstr(line, "texture") != NULL) {
+        if (SDL_strstr(line, "2d")) {
+            *viewDimension = WGPUTextureViewDimension_2D;
+            if (SDL_strstr(line, "2d_array")) {
+                *viewDimension = WGPUTextureViewDimension_2DArray;
+            }
+        } else if (SDL_strstr(line, "3d")) {
+            *viewDimension = WGPUTextureViewDimension_3D;
+        }
+        if (SDL_strstr(line, "cube")) {
+            *viewDimension = WGPUTextureViewDimension_Cube;
+            if (SDL_strstr(line, "cube_array")) {
+                *viewDimension = WGPUTextureViewDimension_CubeArray;
+            }
+        }
+        return WGPUBindingType_Texture;
+    } else {
+        return WGPUBindingType_Undefined;
+    }
+}
+
+static WebGPUBindingInfo *ExtractBindingsFromShader(const char *shaderCode, Uint32 *outBindingCount, WebGPUShaderStage stage)
+{
+
+    // Iterate through each line of the shader code and extract the group and binding numbers when the pattern is found
+    // The pattern is "@group(<group number>) @binding(<binding number>)"
+    const char *pattern = "@group\\((\\d+)\\)\\s*@binding\\((\\d+)\\)";
+    regex_t regex;
+    regmatch_t matches[3]; // 0 is the entire match, 1 is group, 2 is binding
+
+    if (regcomp(&regex, pattern, REG_EXTENDED)) {
+        SDL_LogError(SDL_LOG_CATEGORY_ERROR, "Failed to compile regex pattern: %s", pattern);
+        return NULL;
+    }
+
+    // Allocate an initial array for bindings
+    int capacity = 10;
+    Uint32 count = 0;
+    WebGPUBindingInfo *bindings = (WebGPUBindingInfo *)SDL_malloc(capacity * sizeof(WebGPUBindingInfo));
+
+    // Iterate through each line of the shader code
+    char *line = strtok((char *)shaderCode, "\n");
+    do {
+        // Check if the line matches the pattern
+        if (regexec(&regex, line, 3, matches, 0) == 0) {
+            // Expand the array if needed
+            if (count >= capacity) {
+                capacity *= 2;
+                bindings = (WebGPUBindingInfo *)realloc(bindings, capacity * sizeof(WebGPUBindingInfo));
+            }
+            // Extract group and binding numbers
+            char groupStr[16] = { 0 };
+            char bindingStr[16] = { 0 };
+            strncpy(groupStr, line + matches[1].rm_so, matches[1].rm_eo - matches[1].rm_so);
+            strncpy(bindingStr, line + matches[2].rm_so, matches[2].rm_eo - matches[2].rm_so);
+
+            // Store the group, binding, and type
+            bindings[count].group = atoi(groupStr);
+            bindings[count].binding = atoi(bindingStr);
+            bindings[count].viewDimension = WGPUTextureViewDimension_Undefined;
+            bindings[count].type = DetectBindingType(line, &bindings[count].viewDimension);
+            if (bindings[count].viewDimension != WGPUTextureViewDimension_Undefined) {
+                SDL_Log("Binding %d: Group %d, Binding %d, Type %s, View Dimension %s", count, bindings[count].group, bindings[count].binding, WebGPU_GetBindingTypeString(bindings[count].type), WebGPU_GetTextureViewDimensionString(bindings[count].viewDimension));
+            } else {
+                SDL_Log("Binding %d: Group %d, Binding %d, Type %s", count, bindings[count].group, bindings[count].binding, WebGPU_GetBindingTypeString(bindings[count].type));
+            }
+            bindings[count].stage = stage;
+            count++;
+        }
+    } while ((line = strtok(NULL, "\n")) != NULL);
+
+    regfree(&regex);
+
+    *outBindingCount = count;
+    return bindings;
+}
+
+// ---------------------------------------------------
 
 // WebGPU Functions:
 // ---------------------------------------------------
@@ -1747,7 +1794,7 @@ static void WebGPU_PushVertexUniformData(SDL_GPUCommandBuffer *commandBuffer,
 
         webgpuCmdBuffer->currentGraphicsPipeline->vertexUniformBuffers[slotIndex] = uniformBuffer;
 
-        SDL_Log("Created vertex uniform buffer %p of size %d", buffer->buffer, length);
+        /*SDL_Log("Created vertex uniform buffer %p of size %d", buffer->buffer, length);*/
     } else if (wgpuBufferGetSize(uniformBuffer.buffer->buffer) < length) {
         // If the buffer is too small, we need to recreate it
         WebGPU_ReleaseBuffer((SDL_GPURenderer *)webgpuCmdBuffer->renderer, (SDL_GPUBuffer *)uniformBuffer.buffer);
@@ -1953,6 +2000,7 @@ static SDL_GPUCommandBuffer *WebGPU_AcquireCommandBuffer(SDL_GPURenderer *driver
     commandBuffer->currentScissor = (WebGPURect){ 0, 0, width, height };
     commandBuffer->layerViews = SDL_malloc(sizeof(WGPUTextureView) * 32);
     commandBuffer->layerViewCount = 0;
+    commandBuffer->common.device = renderer->sdlDevice;
 
     WGPUCommandEncoderDescriptor commandEncoderDesc = {
         .label = "SDL_GPU Command Encoder",
@@ -2089,9 +2137,11 @@ void WebGPU_BeginRenderPass(SDL_GPUCommandBuffer *commandBuffer,
     WGPURenderPassColorAttachment *colorAttachments =
         SDL_malloc(sizeof(WGPURenderPassColorAttachment) * colorAttachmentCount);
     if (!colorAttachments) {
+        SDL_OutOfMemory();
         return;
     }
 
+    // Handle color attachments
     for (uint32_t i = 0; i < colorAttachmentCount; i++) {
         const SDL_GPUColorTargetInfo *colorInfo = &colorAttachmentInfos[i];
         WebGPUTexture *texture = (WebGPUTexture *)colorInfo->texture;
@@ -2117,10 +2167,6 @@ void WebGPU_BeginRenderPass(SDL_GPUCommandBuffer *commandBuffer,
                 .a = colorInfo->clear_color.a,
             }
         };
-
-        if (textureView != texture->fullView) {
-            // Handle view cleanup
-        }
 
         if (texture->isMSAAColorTarget) {
             colorAttachments[i].resolveTarget = texture->fullView;
@@ -2151,6 +2197,11 @@ void WebGPU_BeginRenderPass(SDL_GPUCommandBuffer *commandBuffer,
 
     wgpu_cmd_buf->renderPassEncoder =
         wgpuCommandEncoderBeginRenderPass(wgpu_cmd_buf->commandEncoder, &renderPassDesc);
+
+    wgpu_cmd_buf->common.render_pass = (Pass){
+        .command_buffer = commandBuffer,
+        .in_progress = true,
+    };
 
     SDL_free(colorAttachments);
 }
@@ -2593,6 +2644,18 @@ static void WebGPU_ReleaseWindow(SDL_GPURenderer *driverData, SDL_Window *window
 
 // Shader Functions
 // ---------------------------------------------------
+static void WebGPU_SetShaderLabel(
+    SDL_GPURenderer *driverData,
+    SDL_GPUShader *shader,
+    const char *label)
+{
+    SDL_assert(driverData && "Driver data must not be NULL when setting a shader label");
+    SDL_assert(shader && "Shader must not be NULL when setting a shader label");
+
+    WebGPUShader *wgpuShader = (WebGPUShader *)shader;
+    wgpuShaderModuleSetLabel(wgpuShader->shaderModule, label);
+}
+
 static SDL_GPUShader *WebGPU_CreateShader(
     SDL_GPURenderer *driverData,
     const SDL_GPUShaderCreateInfo *shaderCreateInfo)
@@ -2629,17 +2692,16 @@ static SDL_GPUShader *WebGPU_CreateShader(
     shader->storageTextureCount = shaderCreateInfo->num_storage_textures;
     shader->shaderModule = wgpuDeviceCreateShaderModule(renderer->device, &shader_desc);
 
-    const char *stage = shaderCreateInfo->stage == SDL_GPU_SHADERSTAGE_VERTEX ? "Vertex" : "Fragment";
-
-    SDL_Log("Shader Created Successfully: %s", stage);
-    SDL_Log("entry: %s\n", shader->entrypoint);
-    SDL_Log("sampler count: %u\n", shader->samplerCount);
-    SDL_Log("storageBufferCount: %u\n", shader->storageBufferCount);
-    SDL_Log("uniformBufferCount: %u\n", shader->uniformBufferCount);
+    if (SDL_strstr(shader->entrypoint, "blit") == NULL) {
+        SDL_Log("Shader Created Successfully: %s", shader->entrypoint);
+        SDL_Log("entry: %s\n", shader->entrypoint);
+        SDL_Log("sampler count: %u\n", shader->samplerCount);
+        SDL_Log("storageBufferCount: %u\n", shader->storageBufferCount);
+        SDL_Log("uniformBufferCount: %u\n", shader->uniformBufferCount);
+    }
 
     // Set our shader referenceCount to 0 at creation
     SDL_SetAtomicInt(&shader->referenceCount, 0);
-
     return (SDL_GPUShader *)shader;
 }
 
@@ -2675,7 +2737,7 @@ static void WebGPU_ReleaseShader(
 // When building a graphics pipeline, we need to create the VertexState which is comprised of a shader module, an entry,
 // and vertex buffer layouts. Using the existing SDL_GPUVertexInputState, we can create the vertex buffer layouts and
 // pass them to the WGPUVertexState.
-static WGPUVertexBufferLayout *SDL_WGPU_INTERNAL_CreateVertexBufferLayouts(const SDL_GPUVertexInputState *vertexInputState)
+static WGPUVertexBufferLayout *WebGPU_INTERNAL_CreateVertexBufferLayouts(const SDL_GPUVertexInputState *vertexInputState)
 {
     if (vertexInputState == NULL) {
         SDL_LogError(SDL_LOG_CATEGORY_GPU, "Vertex input state must not be NULL when creating vertex buffer layouts");
@@ -2880,7 +2942,6 @@ static WebGPUPipelineResourceLayout *WebGPU_INTERNAL_CreatePipelineResourceLayou
 
     // Allocate memory for the bindings in each bind group layout
     for (Uint32 i = 0; i < bindGroupCount; i += 1) {
-
         size_t bindingsInGroup = 0;
         // Iterate through the bindings and count the number of bindings in the group
         for (Uint32 j = 0; j < bindingCount; j += 1) {
@@ -2915,6 +2976,7 @@ static WebGPUPipelineResourceLayout *WebGPU_INTERNAL_CreatePipelineResourceLayou
         layoutBinding->binding = binding->binding;
         layoutBinding->type = binding->type;
         layoutBinding->stage = binding->stage;
+        layoutBinding->viewDimension = binding->viewDimension;
     }
 
     // We need to iterate through our resource layout bind group layouts and create the WGPUBindGroupLayouts using LayoutEntries and BindGroupLayoutDescriptors
@@ -2934,11 +2996,8 @@ static WebGPUPipelineResourceLayout *WebGPU_INTERNAL_CreatePipelineResourceLayou
         // Currently does not support storage variants of the bindings.
         for (Uint32 j = 0; j < layout->bindingCount; j += 1) {
             WebGPUBindingInfo *binding = &layout->bindings[j];
-            layoutEntries[j].binding = binding->binding;
-
-            SDL_Log("Binding: (%d, %d), Type: %s", binding->group, binding->binding, WebGPU_GetBindingTypeString(binding->type));
-
             WGPUShaderStage stage = WGPUShaderStage_None;
+            layoutEntries[j].binding = binding->binding;
             if (binding->stage & WEBGPU_SHADER_STAGE_VERTEX) {
                 stage |= WGPUShaderStage_Vertex;
             }
@@ -2956,9 +3015,10 @@ static WebGPUPipelineResourceLayout *WebGPU_INTERNAL_CreatePipelineResourceLayou
 
             switch (binding->type) {
             case WGPUBindingType_Texture:
+                SDL_Log("View Dimension: %s", WebGPU_GetTextureViewDimensionString(binding->viewDimension));
                 layoutEntries[j].texture = (WGPUTextureBindingLayout){
                     .sampleType = WGPUTextureSampleType_Float,
-                    .viewDimension = WGPUTextureViewDimension_2D,
+                    .viewDimension = binding->viewDimension,
                     .multisampled = false,
                 };
                 break;
@@ -2969,7 +3029,6 @@ static WebGPUPipelineResourceLayout *WebGPU_INTERNAL_CreatePipelineResourceLayou
                     .hasDynamicOffset = false,
                 };
                 break;
-
             case WGPUBindingType_Sampler:
                 layoutEntries[j].sampler = (WGPUSamplerBindingLayout){
                     .type = WGPUSamplerBindingType_Filtering,
@@ -3057,7 +3116,7 @@ static SDL_GPUGraphicsPipeline *WebGPU_CreateGraphicsPipeline(
     const SDL_GPUVertexInputState *vertexInputState = &pipelineCreateInfo->vertex_input_state;
 
     // Get the vertex buffer layouts for the vertex state if they exist
-    WGPUVertexBufferLayout *vertexBufferLayouts = SDL_WGPU_INTERNAL_CreateVertexBufferLayouts(vertexInputState);
+    WGPUVertexBufferLayout *vertexBufferLayouts = WebGPU_INTERNAL_CreateVertexBufferLayouts(vertexInputState);
 
     // Create the vertex state for the render pipeline
     WGPUVertexState vertexState = {
@@ -3297,6 +3356,7 @@ static SDL_GPUTexture *WebGPU_CreateTexture(
     SDL_snprintf(view_label, sizeof(view_label), "SDL_GPU WebGPU Texture %p's View", wgpuTexture);
 
     WGPUTextureViewDimension dimension = SDLToWGPUTextureViewDimension(textureCreateInfo->type);
+    SDL_Log("Texture Dimension: %s", WebGPU_GetTextureViewDimensionString(dimension));
 
     // Create Texture View for the texture
     WGPUTextureViewDescriptor viewDesc = {
@@ -3722,7 +3782,7 @@ static void WebGPU_INTERNAL_SetBindGroups(SDL_GPUCommandBuffer *commandBuffer)
 
                 // Release the bind group and free the entries (if they already exist)
                 if (pipeline->bindGroups[i].bindGroup != NULL) {
-                    SDL_Log("Releasing bind group %u", i);
+                    /*SDL_Log("Releasing bind group %u", i);*/
 
                     // TODO - This is causing a crash, need to implement a way to grab
                     // any bind groups that are currently in use, store them, and then release them
@@ -3732,7 +3792,7 @@ static void WebGPU_INTERNAL_SetBindGroups(SDL_GPUCommandBuffer *commandBuffer)
 
                     /*wgpuBindGroupRelease(pipeline->bindGroups[i].bindGroup);*/
                     /*SDL_aligned_free(pipeline->bindGroups[i].entries);*/
-                    pipeline->bindGroups[i].entryCount = 0;
+                    /*pipeline->bindGroups[i].entryCount = 0;*/
                 }
 
                 // Copy the bind group over to the pipeline so we don't have to recreate it every frame
@@ -3748,7 +3808,7 @@ static void WebGPU_INTERNAL_SetBindGroups(SDL_GPUCommandBuffer *commandBuffer)
                 // Assign the bind group to the pipeline so that we can reuse it without recreating it.
                 pipeline->bindGroups[i].bindGroup = wgpuDeviceCreateBindGroup(wgpu_cmd_buf->renderer->device, &bindGroupDesc);
 
-                SDL_Log("Created bind group %u, expecting %zu entries", i, pipeline->bindGroups[i].entryCount);
+                /*SDL_Log("Created bind group %u, expecting %zu entries", i, pipeline->bindGroups[i].entryCount);*/
             }
 
             // Reset the cycle flag
@@ -3791,300 +3851,346 @@ static void WebGPU_DrawIndexedPrimitives(
 // Blit Functionality Workaround
 // ---------------------------------------------------
 
-// Vertex shader WGSL
-static const char *blitVertexShader = R"(
+const char *blitVert = R"(
 struct VertexOutput {
-    @builtin(position) position: vec4f,
-    @location(0) texCoord: vec2f,
-}
+    @builtin(position) pos: vec4<f32>,
+    @location(0) tex: vec2<f32>
+};
 
 @vertex
-fn main(@builtin(vertex_index) vertexIndex: u32) -> VertexOutput {
-    var pos = array(
-        vec2f(-1.0, -1.0),
-        vec2f( 3.0, -1.0),
-        vec2f(-1.0,  3.0)
-    );
-    var texCoord = array(
-        vec2f(0.0, 1.0),
-        vec2f(2.0, 1.0),
-        vec2f(0.0, -1.0)
-    );
-
+fn blitVert(@builtin(vertex_index) vertexIndex: u32) -> VertexOutput {
     var output: VertexOutput;
-    output.position = vec4f(pos[vertexIndex], 0.0, 1.0);
-    output.texCoord = texCoord[vertexIndex];
+    let tex = vec2<f32>(
+        f32((vertexIndex << 1u) & 2u),
+        f32(vertexIndex & 2u)
+    );
+    output.tex = tex;
+    output.pos = vec4<f32>(
+        tex * vec2<f32>(2.0, -2.0) + vec2<f32>(-1.0, 1.0),
+        0.0,
+        1.0
+    );
     return output;
 }
 )";
 
-// Fragment shader WGSL
-static const char *blitFragmentShader = R"(
+const char *commonCode = R"(
+struct SourceRegionBuffer {
+    uvLeftTop: vec2<f32>,
+    uvDimensions: vec2<f32>,
+    mipLevel: f32,
+    layerOrDepth: f32
+}
 
-    struct BlitParams {
-        layer: f32,
-        padding1: f32,
-        padding2: f32,
-        padding3: f32,
-    }
-
-    @group(0) @binding(0) var sourceTex: texture_3d<f32>;
-    @group(0) @binding(1) var texSampler: sampler;
-    @group(0) @binding(2) var<uniform> params: BlitParams;
-
-    @fragment
-    fn main(@location(0) texCoord: vec2f) -> @location(0) vec4f {
-        return textureSample(sourceTex, texSampler, vec3f(texCoord, params.layer));
-    }
+@group(0) @binding(0) var sourceSampler: sampler;
+@group(1) @binding(0) var<uniform> sourceRegion: SourceRegionBuffer;
 )";
 
-typedef struct
-{
-    float layer;
-    float padding[3];
-} BlitParams;
+const char *blit2DShader = R"(
+@group(0) @binding(1) var sourceTexture2D: texture_2d<f32>;
 
-// Pipeline creation and cache management
-static WGPUBindGroupLayout CreateBlitBindGroupLayout(WGPUDevice device)
-{
-    WGPUBindGroupLayoutEntry bindGroupLayoutEntries[] = {
-        {
-            .binding = 0,
-            .visibility = WGPUShaderStage_Fragment,
-            .texture.sampleType = WGPUTextureSampleType_Float,
-            .texture.viewDimension = WGPUTextureViewDimension_3D,
-        },
-        {
-            .binding = 1,
-            .visibility = WGPUShaderStage_Fragment,
-            .sampler.type = WGPUSamplerBindingType_Filtering,
-        },
-        {
-            .binding = 2,
-            .visibility = WGPUShaderStage_Fragment,
-            .buffer.type = WGPUBufferBindingType_Uniform,
-            .buffer.minBindingSize = sizeof(BlitParams),
-        }
-    };
-
-    WGPUBindGroupLayoutDescriptor bindGroupLayoutDesc = {
-        .entryCount = SDL_arraysize(bindGroupLayoutEntries),
-        .entries = bindGroupLayoutEntries,
-        .label = "Blit Bind Group Layout"
-    };
-
-    return wgpuDeviceCreateBindGroupLayout(device, &bindGroupLayoutDesc);
+@fragment
+fn blitFrom2D(@location(0) tex: vec2<f32>) -> @location(0) vec4<f32> {
+    let newCoord = sourceRegion.uvLeftTop + sourceRegion.uvDimensions * tex;
+    return textureSampleLevel(sourceTexture2D, sourceSampler, newCoord, sourceRegion.mipLevel);
 }
+)";
 
-void WebGPU_INTERNAL_CreateBlitCache(WebGPURenderer *renderer, WGPUTextureFormat dstFormat)
+const char *blit2DArrayShader = R"(
+@group(0) @binding(1) var sourceTexture2DArray: texture_2d_array<f32>;
+
+@fragment
+fn blitFrom2DArray(@location(0) tex: vec2<f32>) -> @location(0) vec4<f32> {
+    let newCoord = vec2<f32>(
+        sourceRegion.uvLeftTop + sourceRegion.uvDimensions * tex
+    );
+    return textureSampleLevel(sourceTexture2DArray, sourceSampler, newCoord, u32(sourceRegion.layerOrDepth), sourceRegion.mipLevel);
+}
+)";
+
+const char *blit3DShader = R"(
+@group(0) @binding(1) var sourceTexture3D: texture_3d<f32>;
+
+@fragment
+fn blitFrom3D(@location(0) tex: vec2<f32>) -> @location(0) vec4<f32> {
+    let newCoord = vec3<f32>(
+        sourceRegion.uvLeftTop + sourceRegion.uvDimensions * tex,
+        sourceRegion.layerOrDepth
+    );
+    return textureSampleLevel(sourceTexture3D, sourceSampler, newCoord, sourceRegion.mipLevel);
+}
+)";
+
+const char *blitCubeShader = R"(
+@group(0) @binding(1) var sourceTextureCube: texture_cube<f32>;
+
+@fragment
+fn blitFromCube(@location(0) tex: vec2<f32>) -> @location(0) vec4<f32> {
+    let scaledUV = sourceRegion.uvLeftTop + sourceRegion.uvDimensions * tex;
+    let u = 2.0 * scaledUV.x - 1.0;
+    let v = 2.0 * scaledUV.y - 1.0;
+    var newCoord: vec3<f32>;
+
+    switch(u32(sourceRegion.layerOrDepth)) {
+        case 0u: { newCoord = vec3<f32>(1.0, -v, -u); }
+        case 1u: { newCoord = vec3<f32>(-1.0, -v, u); }
+        case 2u: { newCoord = vec3<f32>(u, 1.0, -v); }
+        case 3u: { newCoord = vec3<f32>(u, -1.0, v); }
+        case 4u: { newCoord = vec3<f32>(u, -v, 1.0); }
+        case 5u: { newCoord = vec3<f32>(-u, -v, -1.0); }
+        default: { newCoord = vec3<f32>(0.0, 0.0, 0.0); }
+    }
+
+    return textureSampleLevel(sourceTextureCube, sourceSampler, newCoord, sourceRegion.mipLevel);
+}
+)";
+
+const char *blitCubeArrayShader = R"(
+@group(0) @binding(1) var sourceTextureCubeArray: texture_cube_array<f32>;
+
+@fragment
+fn blitFromCubeArray(@location(0) tex: vec2<f32>) -> @location(0) vec4<f32> {
+    let scaledUV = sourceRegion.uvLeftTop + sourceRegion.uvDimensions * tex;
+    let u = 2.0 * scaledUV.x - 1.0;
+    let v = 2.0 * scaledUV.y - 1.0;
+    let arrayIndex = u32(sourceRegion.layerOrDepth) / 6u;
+    var newCoord: vec3<f32>;
+
+    switch(u32(sourceRegion.layerOrDepth) % 6u) {
+        case 0u: { newCoord = vec3<f32>(1.0, -v, -u); }
+        case 1u: { newCoord = vec3<f32>(-1.0, -v, u); }
+        case 2u: { newCoord = vec3<f32>(u, 1.0, -v); }
+        case 3u: { newCoord = vec3<f32>(u, -1.0, v); }
+        case 4u: { newCoord = vec3<f32>(u, -v, 1.0); }
+        case 5u: { newCoord = vec3<f32>(-u, -v, -1.0); }
+        default: { newCoord = vec3<f32>(0.0, 0.0, 0.0); }
+    }
+
+    return textureSampleLevel(sourceTextureCubeArray, sourceSampler, newCoord, arrayIndex, sourceRegion.mipLevel);
+}
+)";
+
+static void WebGPU_INTERNAL_InitBlitResources(
+    WebGPURenderer *renderer)
 {
-    WGPUDevice device = renderer->device;
+    SDL_GPUShaderCreateInfo shaderCreateInfo;
+    SDL_GPUSamplerCreateInfo samplerCreateInfo;
 
-    // Create pipeline layout if not cached
-    if (!renderer->blitCache.bindGroupLayout) {
-        renderer->blitCache.bindGroupLayout = CreateBlitBindGroupLayout(device);
+    SDL_Log("Initializing WebGPU blit resources");
+
+    renderer->blitPipelineCapacity = 6;
+    renderer->blitPipelineCount = 0;
+    renderer->blitPipelines = (BlitPipelineCacheEntry *)SDL_malloc(
+        renderer->blitPipelineCapacity * sizeof(BlitPipelineCacheEntry));
+
+    // Fullscreen vertex shader
+    SDL_zero(shaderCreateInfo);
+    shaderCreateInfo.code = (Uint8 *)blitVert;
+    shaderCreateInfo.code_size = SDL_strlen(blitVert);
+    shaderCreateInfo.stage = SDL_GPU_SHADERSTAGE_VERTEX;
+    shaderCreateInfo.format = SDL_GPU_SHADERFORMAT_WGSL;
+    shaderCreateInfo.entrypoint = "blitVert";
+    renderer->blitVertexShader = WebGPU_CreateShader(
+        (SDL_GPURenderer *)renderer,
+        &shaderCreateInfo);
+    if (renderer->blitVertexShader == NULL) {
+        SDL_LogError(SDL_LOG_CATEGORY_GPU, "Failed to compile vertex shader for blit!");
     }
+    WebGPU_SetShaderLabel((SDL_GPURenderer *)renderer, renderer->blitVertexShader, "BlitVertex");
 
-    if (!renderer->blitCache.pipelineLayout) {
-        WGPUPipelineLayoutDescriptor pipelineLayoutDesc = {
-            .bindGroupLayoutCount = 1,
-            .bindGroupLayouts = &renderer->blitCache.bindGroupLayout,
-            .label = "Blit Pipeline Layout"
-        };
-        renderer->blitCache.pipelineLayout = wgpuDeviceCreatePipelineLayout(device, &pipelineLayoutDesc);
+    char *WebGPUBlit2D = SDL_stack_alloc(char, SDL_strlen(commonCode) + SDL_strlen(blit2DShader) + 1);
+    if (WebGPUBlit2D == NULL) {
+        SDL_OutOfMemory();
+        return;
     }
+    SDL_strlcpy(WebGPUBlit2D, commonCode, SDL_strlen(commonCode) + 1);
+    SDL_strlcat(WebGPUBlit2D, blit2DShader, SDL_strlen(commonCode) + SDL_strlen(blit2DShader) + 1);
+    shaderCreateInfo.code = (Uint8 *)WebGPUBlit2D;
+    shaderCreateInfo.code_size = SDL_strlen(WebGPUBlit2D);
+    shaderCreateInfo.stage = SDL_GPU_SHADERSTAGE_FRAGMENT;
+    shaderCreateInfo.num_samplers = 1;
+    shaderCreateInfo.format = SDL_GPU_SHADERFORMAT_WGSL;
+    shaderCreateInfo.num_uniform_buffers = 1;
+    shaderCreateInfo.entrypoint = "blitFrom2D";
+    renderer->blitFrom2DShader = WebGPU_CreateShader(
+        (SDL_GPURenderer *)renderer,
+        &shaderCreateInfo);
+    if (renderer->blitFrom2DShader == NULL) {
+        SDL_LogError(SDL_LOG_CATEGORY_GPU, "Failed to compile BlitFrom2D pixel shader!");
+    }
+    WebGPU_SetShaderLabel((SDL_GPURenderer *)renderer, renderer->blitFrom2DShader, "BlitFrom2D");
 
-    // Create pipeline
-    WGPUColorTargetState colorTarget = {
-        .format = dstFormat,
-        .blend = &(WGPUBlendState){
-            .color = {
-                .operation = WGPUBlendOperation_Add,
-                .srcFactor = WGPUBlendFactor_One,
-                .dstFactor = WGPUBlendFactor_Zero,
-            },
-            .alpha = {
-                .operation = WGPUBlendOperation_Add,
-                .srcFactor = WGPUBlendFactor_One,
-                .dstFactor = WGPUBlendFactor_Zero,
-            } },
-        .writeMask = WGPUColorWriteMask_All,
-    };
+    char *WebGPUBlit2DArray = SDL_stack_alloc(char, SDL_strlen(commonCode) + SDL_strlen(blit2DArrayShader) + 1);
+    if (WebGPUBlit2DArray == NULL) {
+        SDL_OutOfMemory();
+        return;
+    }
+    SDL_strlcpy(WebGPUBlit2DArray, commonCode, SDL_strlen(commonCode) + 1);
+    SDL_strlcat(WebGPUBlit2DArray, blit2DArrayShader, SDL_strlen(commonCode) + SDL_strlen(blit2DArrayShader) + 1);
+    shaderCreateInfo.code = (Uint8 *)WebGPUBlit2DArray;
+    shaderCreateInfo.code_size = SDL_strlen(WebGPUBlit2DArray);
+    shaderCreateInfo.stage = SDL_GPU_SHADERSTAGE_FRAGMENT;
+    shaderCreateInfo.entrypoint = "blitFrom2DArray";
+    renderer->blitFrom2DArrayShader = WebGPU_CreateShader(
+        (SDL_GPURenderer *)renderer,
+        &shaderCreateInfo);
+    if (renderer->blitFrom2DArrayShader == NULL) {
+        SDL_LogError(SDL_LOG_CATEGORY_GPU, "Failed to compile BlitFrom2DArray pixel shader!");
+    }
+    WebGPU_SetShaderLabel((SDL_GPURenderer *)renderer, renderer->blitFrom2DArrayShader, "BlitFrom2DArray");
 
-    WGPURenderPipelineDescriptor pipelineDesc = {
-        .layout = renderer->blitCache.pipelineLayout,
-        .vertex = {
-            .module = renderer->blitCache.vertexModule,
-            .entryPoint = "main",
-            .bufferCount = 0,
-        },
-        .fragment = &(WGPUFragmentState){
-            .module = renderer->blitCache.fragmentModule,
-            .entryPoint = "main",
-            .targetCount = 1,
-            .targets = &colorTarget,
-        },
-        .primitive = {
-            .topology = WGPUPrimitiveTopology_TriangleList,
-            .cullMode = WGPUCullMode_None,
-        },
-        .multisample = {
-            .count = 1,
-            .mask = 0xFFFFFFFF,
-            .alphaToCoverageEnabled = false,
-        },
-        .label = "Blit Pipeline"
-    };
+    char *WebGPUBlit3D = SDL_stack_alloc(char, SDL_strlen(commonCode) + SDL_strlen(blit3DShader) + 1);
+    if (WebGPUBlit3D == NULL) {
+        SDL_OutOfMemory();
+        return;
+    }
+    SDL_strlcpy(WebGPUBlit3D, commonCode, SDL_strlen(commonCode) + 1);
+    SDL_strlcat(WebGPUBlit3D, blit3DShader, SDL_strlen(commonCode) + SDL_strlen(blit3DShader) + 1);
+    shaderCreateInfo.code = (Uint8 *)WebGPUBlit3D;
+    shaderCreateInfo.code_size = SDL_strlen(WebGPUBlit3D);
+    shaderCreateInfo.entrypoint = "blitFrom3D";
+    renderer->blitFrom3DShader = WebGPU_CreateShader(
+        (SDL_GPURenderer *)renderer,
+        &shaderCreateInfo);
+    if (renderer->blitFrom3DShader == NULL) {
+        SDL_LogError(SDL_LOG_CATEGORY_GPU, "Failed to compile BlitFrom3D pixel shader!");
+    }
+    WebGPU_SetShaderLabel((SDL_GPURenderer *)renderer, renderer->blitFrom3DShader, "BlitFrom3D");
 
-    renderer->blitCache.blitPipeline = wgpuDeviceCreateRenderPipeline(device, &pipelineDesc);
+    char *WebGPUBlitCube = SDL_stack_alloc(char, SDL_strlen(commonCode) + SDL_strlen(blitCubeShader) + 1);
+    if (WebGPUBlitCube == NULL) {
+        SDL_OutOfMemory();
+        return;
+    }
+    SDL_strlcpy(WebGPUBlitCube, commonCode, SDL_strlen(commonCode) + 1);
+    SDL_strlcat(WebGPUBlitCube, blitCubeShader, SDL_strlen(commonCode) + SDL_strlen(blitCubeShader) + 1);
+    shaderCreateInfo.code = (Uint8 *)WebGPUBlitCube;
+    shaderCreateInfo.code_size = SDL_strlen(WebGPUBlitCube);
+    shaderCreateInfo.entrypoint = "blitFromCube";
+    renderer->blitFromCubeShader = WebGPU_CreateShader(
+        (SDL_GPURenderer *)renderer,
+        &shaderCreateInfo);
+    if (renderer->blitFromCubeShader == NULL) {
+        SDL_LogError(SDL_LOG_CATEGORY_GPU, "Failed to compile BlitFromCube pixel shader!");
+    }
+    WebGPU_SetShaderLabel((SDL_GPURenderer *)renderer, renderer->blitFromCubeShader, "BlitFromCube");
+
+    char *WebGPUBlitCubeArray = SDL_stack_alloc(char, SDL_strlen(commonCode) + SDL_strlen(blitCubeArrayShader) + 1);
+    if (WebGPUBlitCubeArray == NULL) {
+        SDL_OutOfMemory();
+        return;
+    }
+    SDL_strlcpy(WebGPUBlitCubeArray, commonCode, SDL_strlen(commonCode) + 1);
+    SDL_strlcat(WebGPUBlitCubeArray, blitCubeArrayShader, SDL_strlen(commonCode) + SDL_strlen(blitCubeArrayShader) + 1);
+    shaderCreateInfo.code = (Uint8 *)WebGPUBlitCubeArray;
+    shaderCreateInfo.code_size = SDL_strlen(WebGPUBlitCubeArray);
+    shaderCreateInfo.entrypoint = "blitFromCubeArray";
+    renderer->blitFromCubeArrayShader = WebGPU_CreateShader(
+        (SDL_GPURenderer *)renderer,
+        &shaderCreateInfo);
+    if (renderer->blitFromCubeArrayShader == NULL) {
+        SDL_LogError(SDL_LOG_CATEGORY_GPU, "Failed to compile BlitFromCubeArray pixel shader!");
+    }
+    WebGPU_SetShaderLabel((SDL_GPURenderer *)renderer, renderer->blitFromCubeArrayShader, "BlitFromCubeArray");
 
     // Create samplers
-    if (!renderer->blitCache.nearestSampler) {
-        WGPUSamplerDescriptor samplerDesc = {
-            .label = "Nearest Sampler",
-            .addressModeU = WGPUAddressMode_ClampToEdge,
-            .addressModeV = WGPUAddressMode_ClampToEdge,
-            .addressModeW = WGPUAddressMode_ClampToEdge,
-            .magFilter = WGPUFilterMode_Nearest,
-            .minFilter = WGPUFilterMode_Nearest,
-            .mipmapFilter = WGPUMipmapFilterMode_Nearest,
-            .lodMinClamp = 0.0f,
-            .lodMaxClamp = 0.0f,
-            .compare = WGPUCompareFunction_Undefined,
-            .maxAnisotropy = 1,
-        };
-        renderer->blitCache.nearestSampler = wgpuDeviceCreateSampler(device, &samplerDesc);
+    samplerCreateInfo.address_mode_u = SDL_GPU_SAMPLERADDRESSMODE_CLAMP_TO_EDGE;
+    samplerCreateInfo.address_mode_v = SDL_GPU_SAMPLERADDRESSMODE_CLAMP_TO_EDGE;
+    samplerCreateInfo.address_mode_w = SDL_GPU_SAMPLERADDRESSMODE_CLAMP_TO_EDGE;
+    samplerCreateInfo.enable_anisotropy = 0;
+    samplerCreateInfo.enable_compare = 0;
+    samplerCreateInfo.mag_filter = SDL_GPU_FILTER_NEAREST;
+    samplerCreateInfo.min_filter = SDL_GPU_FILTER_NEAREST;
+    samplerCreateInfo.mipmap_mode = SDL_GPU_SAMPLERMIPMAPMODE_NEAREST;
+    samplerCreateInfo.mip_lod_bias = 0.0f;
+    samplerCreateInfo.min_lod = 0;
+    samplerCreateInfo.max_lod = 1000;
+    samplerCreateInfo.max_anisotropy = 1.0f;
+    samplerCreateInfo.compare_op = SDL_GPU_COMPAREOP_INVALID;
+
+    renderer->blitNearestSampler = WebGPU_CreateSampler(
+        (SDL_GPURenderer *)renderer,
+        &samplerCreateInfo);
+
+    if (renderer->blitNearestSampler == NULL) {
+        SDL_LogError(SDL_LOG_CATEGORY_GPU, "Failed to create blit nearest sampler!");
     }
 
-    if (!renderer->blitCache.linearSampler) {
-        WGPUSamplerDescriptor samplerDesc = {
-            .label = "Linear Sampler",
-            .addressModeU = WGPUAddressMode_ClampToEdge,
-            .addressModeV = WGPUAddressMode_ClampToEdge,
-            .addressModeW = WGPUAddressMode_ClampToEdge,
-            .magFilter = WGPUFilterMode_Linear,
-            .minFilter = WGPUFilterMode_Linear,
-            .mipmapFilter = WGPUMipmapFilterMode_Linear,
-            .lodMinClamp = 0.0f,
-            .lodMaxClamp = 0.0f,
-            .compare = WGPUCompareFunction_Undefined,
-            .maxAnisotropy = 1,
-        };
-        renderer->blitCache.linearSampler = wgpuDeviceCreateSampler(device, &samplerDesc);
+    samplerCreateInfo.mag_filter = SDL_GPU_FILTER_LINEAR;
+    samplerCreateInfo.min_filter = SDL_GPU_FILTER_LINEAR;
+    samplerCreateInfo.mipmap_mode = SDL_GPU_SAMPLERMIPMAPMODE_LINEAR;
+
+    renderer->blitLinearSampler = WebGPU_CreateSampler(
+        (SDL_GPURenderer *)renderer,
+        &samplerCreateInfo);
+
+    if (renderer->blitLinearSampler == NULL) {
+        SDL_LogError(SDL_LOG_CATEGORY_GPU, "Failed to create blit linear sampler!");
     }
 
-    renderer->blitCache.uniformBuffer = wgpuDeviceCreateBuffer(device, &(WGPUBufferDescriptor){
-                                                                           .size = sizeof(BlitParams),
-                                                                           .usage = WGPUBufferUsage_Uniform | WGPUBufferUsage_CopyDst | WGPUBufferUsage_CopySrc,
-                                                                           .mappedAtCreation = false,
-                                                                       });
+    WebGPUSampler *linearSampler = (WebGPUSampler *)renderer->blitLinearSampler;
+    WebGPUSampler *nearestSampler = (WebGPUSampler *)renderer->blitNearestSampler;
+
+    // Set the labels of the samplers
+    wgpuSamplerSetLabel(nearestSampler->sampler, "Blit Nearest Sampler");
+    wgpuSamplerSetLabel(linearSampler->sampler, "Blit Linear Sampler");
+
+    // We don't need the shader strings
+    SDL_stack_free(WebGPUBlit2D);
+    SDL_stack_free(WebGPUBlit2DArray);
+    SDL_stack_free(WebGPUBlit3D);
+    SDL_stack_free(WebGPUBlitCube);
+    SDL_stack_free(WebGPUBlitCubeArray);
 }
 
-// Custom blitting operation to mimic SDL3's vkCmdBlitImage functionality
+static void WebGPU_INTERNAL_ReleaseBlitPipelines(SDL_GPURenderer *driverData)
+{
+    WebGPURenderer *renderer = (WebGPURenderer *)driverData;
+    WebGPU_ReleaseSampler(driverData, renderer->blitLinearSampler);
+    WebGPU_ReleaseSampler(driverData, renderer->blitNearestSampler);
+    WebGPU_ReleaseShader(driverData, renderer->blitVertexShader);
+    WebGPU_ReleaseShader(driverData, renderer->blitFrom2DShader);
+    WebGPU_ReleaseShader(driverData, renderer->blitFrom2DArrayShader);
+    WebGPU_ReleaseShader(driverData, renderer->blitFrom3DShader);
+    WebGPU_ReleaseShader(driverData, renderer->blitFromCubeShader);
+    WebGPU_ReleaseShader(driverData, renderer->blitFromCubeArrayShader);
+
+    for (Uint32 i = 0; i < renderer->blitPipelineCount; i += 1) {
+        WebGPU_ReleaseGraphicsPipeline(driverData, renderer->blitPipelines[i].pipeline);
+    }
+    SDL_free(renderer->blitPipelines);
+}
+
 static void WebGPU_Blit(SDL_GPUCommandBuffer *commandBuffer, const SDL_GPUBlitInfo *info)
 {
     if (!commandBuffer || !info) {
         return;
     }
 
+    // get renderer from command buffer
     WebGPUCommandBuffer *wgpu_cmd_buf = (WebGPUCommandBuffer *)commandBuffer;
-    const SDL_GPUBlitRegion *src_region = &info->source;
-    const SDL_GPUBlitRegion *dst_region = &info->destination;
-    WebGPUTexture *src_texture = (WebGPUTexture *)src_region->texture;
-    WebGPUTexture *dst_texture = (WebGPUTexture *)dst_region->texture;
-    WGPUTextureFormat src_format = SDLToWGPUTextureFormat(src_texture->format);
-    WGPUTextureFormat dst_format = SDLToWGPUTextureFormat(dst_texture->format);
+    WebGPURenderer *renderer = wgpu_cmd_buf->renderer;
 
-    // If there is no blit pipeline cached, create it
-    if (wgpu_cmd_buf->renderer->blitCache.blitPipeline == NULL) {
-        WebGPU_INTERNAL_CreateBlitCache(wgpu_cmd_buf->renderer, dst_format);
-    }
+    /*// Create a new command buffer for this blit command*/
+    SDL_GPUCommandBuffer *new_cmd_buf = WebGPU_AcquireCommandBuffer((SDL_GPURenderer *)renderer);
 
-    WGPURenderPipeline blitPipeline = wgpu_cmd_buf->renderer->blitCache.blitPipeline;
+    SDL_GPU_BlitCommon(
+        new_cmd_buf,
+        info,
+        renderer->blitLinearSampler,
+        renderer->blitNearestSampler,
+        renderer->blitVertexShader,
+        renderer->blitFrom2DShader,
+        renderer->blitFrom2DArrayShader,
+        renderer->blitFrom3DShader,
+        renderer->blitFromCubeShader,
+        renderer->blitFromCubeArrayShader,
+        &renderer->blitPipelines,
+        &renderer->blitPipelineCount,
+        &renderer->blitPipelineCapacity);
 
-    // Create source texture view if needed (use existing fullView if possible)
-    WGPUTextureView sourceView = src_texture->fullView;
-
-    // Normalize layer to 0-1 range for 3D textures
-    float layer = (float)src_region->layer_or_depth_plane / (float)src_texture->layerCount;
-
-    // Create uniform buffer for layer/depth information
-    BlitParams params = {
-        .layer = layer,
-        .padding = { 0.0f, 0.0f, 0.0f },
-    };
-
-    wgpuQueueWriteBuffer(wgpu_cmd_buf->renderer->queue, wgpu_cmd_buf->renderer->blitCache.uniformBuffer, 0, &params, sizeof(BlitParams));
-
-    WGPUBindGroupEntry entries[] = {
-        {
-            .binding = 0,
-            .textureView = sourceView,
-        },
-        {
-            .binding = 1,
-            .sampler = info->filter == SDL_GPU_FILTER_LINEAR ? wgpu_cmd_buf->renderer->blitCache.linearSampler : wgpu_cmd_buf->renderer->blitCache.nearestSampler,
-        },
-        {
-            .binding = 2,
-            .buffer = wgpu_cmd_buf->renderer->blitCache.uniformBuffer,
-            .offset = 0,
-            .size = sizeof(BlitParams),
-        },
-    };
-
-    // Create bind group
-    WGPUBindGroup bindGroup = wgpuDeviceCreateBindGroup(wgpu_cmd_buf->renderer->device, &(WGPUBindGroupDescriptor){
-                                                                                            .layout = wgpuRenderPipelineGetBindGroupLayout(blitPipeline, 0),
-                                                                                            .entries = entries,
-                                                                                            .entryCount = SDL_arraysize(entries),
-                                                                                        });
-
-    // Begin render pass
-    WGPURenderPassColorAttachment colorAttachment = {
-        .view = dst_texture->fullView,
-        .loadOp = info->load_op == SDL_GPU_LOADOP_LOAD ? WGPULoadOp_Load : WGPULoadOp_Clear,
-        .storeOp = WGPUStoreOp_Store,
-        .depthSlice = ~0u,
-    };
-
-    WGPURenderPassDescriptor renderPassDesc = {
-        .colorAttachmentCount = 1,
-        .colorAttachments = &colorAttachment,
-        .label = "SDL3 WebGPU Blit Render Pass",
-    };
-
-    WGPUCommandEncoder cmd_encoder = wgpuDeviceCreateCommandEncoder(wgpu_cmd_buf->renderer->device, NULL);
-    WGPURenderPassEncoder render_pass = wgpuCommandEncoderBeginRenderPass(cmd_encoder, &renderPassDesc);
-
-    // Set viewport and scissor based on destination region
-    wgpuRenderPassEncoderSetViewport(
-        render_pass,
-        dst_region->x, dst_region->y,
-        dst_region->w, dst_region->h,
-        0.0f, 1.0f);
-
-    wgpuRenderPassEncoderSetScissorRect(
-        render_pass,
-        dst_region->x, dst_region->y,
-        dst_region->w, dst_region->h);
-
-    // Set pipeline and bind group
-    wgpuRenderPassEncoderSetPipeline(render_pass, blitPipeline);
-    wgpuRenderPassEncoderSetBindGroup(render_pass, 0, bindGroup, 0, NULL);
-
-    // Draw fullscreen triangle
-    wgpuRenderPassEncoderDraw(render_pass, 3, 1, 0, 0);
-    wgpuRenderPassEncoderEnd(render_pass);
-
-    // Submit command buffer
-    WGPUCommandBuffer cmd_buffer = wgpuCommandEncoderFinish(cmd_encoder, NULL);
-    wgpuQueueSubmit(wgpu_cmd_buf->renderer->queue, 1, &cmd_buffer);
-    wgpuCommandBufferRelease(cmd_buffer);
-    wgpuCommandEncoderRelease(cmd_encoder);
-
-    // Cleanup
-    wgpuBindGroupRelease(bindGroup);
+    // Submit the command buffer
+    WebGPU_Submit(new_cmd_buf);
 }
 
 // ---------------------------------------------------
@@ -4100,13 +4206,17 @@ static void WebGPU_DestroyDevice(SDL_GPUDevice *device)
 {
     WebGPURenderer *renderer = (WebGPURenderer *)device->driverData;
 
+    // Release all blit pipelines
+    WebGPU_INTERNAL_ReleaseBlitPipelines((SDL_GPURenderer *)renderer);
+
     // Destroy all claimed windows
     for (Uint32 i = 0; i < renderer->claimedWindowCount; i += 1) {
         WebGPU_ReleaseWindow((SDL_GPURenderer *)renderer, renderer->claimedWindows[i]->window);
     }
 
     /*// Destroy the device*/
-    wgpuDeviceRelease(renderer->device);
+    wgpuDeviceDestroy(renderer->device);
+
     wgpuAdapterRelease(renderer->adapter);
     wgpuInstanceRelease(renderer->instance);
 
@@ -4122,7 +4232,7 @@ static SDL_GPUDevice *WebGPU_CreateDevice(bool debug, bool preferLowPower, SDL_P
     // Allocate memory for the renderer and device
     renderer = (WebGPURenderer *)SDL_malloc(sizeof(WebGPURenderer));
     memset(renderer, '\0', sizeof(WebGPURenderer));
-    renderer->debugMode = debug;
+    renderer->debug = debug;
     renderer->preferLowPower = preferLowPower;
 
     // Initialize WebGPU instance so that we can request an adapter and then device
@@ -4156,30 +4266,7 @@ static SDL_GPUDevice *WebGPU_CreateDevice(bool debug, bool preferLowPower, SDL_P
     // Acquire the queue from the device
     renderer->queue = wgpuDeviceGetQueue(renderer->device);
 
-    // Initialize the blit cache
-    renderer->blitCache.blitPipeline = NULL;
-    renderer->blitCache.bindGroupLayout = NULL;
-    renderer->blitCache.pipelineLayout = NULL;
-    renderer->blitCache.bindGroup = NULL;
-    renderer->blitCache.uniformBuffer = NULL;
-    renderer->blitCache.nearestSampler = NULL;
-    renderer->blitCache.linearSampler = NULL;
-    renderer->blitCache.vertexModule = wgpuDeviceCreateShaderModule(renderer->device, &(WGPUShaderModuleDescriptor){
-                                                                                          .nextInChain = (WGPUChainedStruct *)&(WGPUShaderModuleWGSLDescriptor){
-                                                                                              .code = blitVertexShader,
-                                                                                              .chain = {
-                                                                                                  .sType = WGPUSType_ShaderModuleWGSLDescriptor,
-                                                                                              },
-                                                                                          },
-                                                                                      });
-    renderer->blitCache.fragmentModule = wgpuDeviceCreateShaderModule(renderer->device, &(WGPUShaderModuleDescriptor){
-                                                                                            .nextInChain = (WGPUChainedStruct *)&(WGPUShaderModuleWGSLDescriptor){
-                                                                                                .code = blitFragmentShader,
-                                                                                                .chain = {
-                                                                                                    .sType = WGPUSType_ShaderModuleWGSLDescriptor,
-                                                                                                },
-                                                                                            },
-                                                                                        });
+    WebGPU_INTERNAL_InitBlitResources(renderer);
 
     result = (SDL_GPUDevice *)SDL_malloc(sizeof(SDL_GPUDevice));
 
@@ -4259,6 +4346,8 @@ static SDL_GPUDevice *WebGPU_CreateDevice(bool debug, bool preferLowPower, SDL_P
     result->EndRenderPass = WebGPU_EndRenderPass;
     result->BeginCopyPass = WebGPU_BeginCopyPass;
     result->EndCopyPass = WebGPU_EndCopyPass;
+
+    renderer->sdlDevice = result;
 
     return result;
 }
