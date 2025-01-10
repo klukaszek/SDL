@@ -3698,7 +3698,7 @@ void WebGPU_SetScissorRect(SDL_GPUCommandBuffer *renderPass, const SDL_Rect *sci
 static void WebGPU_SetStencilReference(SDL_GPUCommandBuffer *commandBuffer,
                                        Uint8 reference)
 {
-    // no-op (pass)
+    wgpuRenderPassEncoderSetStencilReference(((WebGPUCommandBuffer *)commandBuffer)->renderPassEncoder, reference);
 }
 
 static void WebGPU_BindGraphicsPipeline(
