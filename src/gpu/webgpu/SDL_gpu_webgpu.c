@@ -2477,7 +2477,7 @@ static bool WebGPU_SupportsTextureFormat(SDL_GPURenderer *driverData,
     WGPUTextureDimension dimension = WGPUTextureDimension_Undefined;
     if (type == SDL_GPU_TEXTURETYPE_2D || type == SDL_GPU_TEXTURETYPE_2D_ARRAY) {
         dimension = WGPUTextureDimension_2D;
-    } else if (type == SDL_GPU_TEXTURETYPE_3D || type == SDL_GPU_TEXTURETYPE_CUBE_ARRAY) {
+    } else if (type == SDL_GPU_TEXTURETYPE_3D || type == SDL_GPU_TEXTURETYPE_CUBE_ARRAY || type == SDL_GPU_TEXTURETYPE_CUBE) {
         dimension = WGPUTextureDimension_3D;
     }
 
