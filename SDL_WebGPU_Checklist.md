@@ -115,4 +115,4 @@ Note: All functions are implemented but have not been fully tested for memory co
 - [x] SetStencilReference
 
 ## Composition
-- [ ] Blit (IN PROGRESS: 3D textures work, need to test 2d, 2d_array, cube, and cube_array)
+- [ ] Blit (IN PROGRESS: Blit2DArray has a sampeler issue where the RHS is not downsampled)
