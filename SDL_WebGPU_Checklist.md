@@ -115,4 +115,4 @@ Note: All functions are implemented but have not been fully tested for memory co
 - [x] SetStencilReference
 
 ## Composition
-- [ ] Blit (IN PROGRESS: Blit2DArray has a sampeler issue where the RHS is not downsampled)
+- [ ] Blit (IN PROGRESS: Blit2DArray has a sampler issue where the RHS is not downsampled)
