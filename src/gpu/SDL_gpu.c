@@ -421,9 +421,9 @@ static const SDL_GPUBootstrap *SDL_GPUSelectBackend(SDL_PropertiesID props)
             if (SDL_strcasecmp(gpudriver, backends[i]->name) == 0) {
                 if (!(backends[i]->shader_formats | format_flags)) {
                     SDL_Log("Selected GPU driver: %s", gpudriver);
-                    SDL_Log("Expected Flags: %u", format_flags);
-                    SDL_Log("WGSL Flag: %u", SDL_GPU_SHADERFORMAT_WGSL);
-                    SDL_Log("Backend Flags: %u", backends[i]->shader_formats);
+                    /*SDL_Log("Expected Flags: %u", format_flags);*/
+                    /*SDL_Log("WGSL Flag: %u", SDL_GPU_SHADERFORMAT_WGSL);*/
+                    /*SDL_Log("Backend Flags: %u", backends[i]->shader_formats);*/
                     SDL_LogError(SDL_LOG_CATEGORY_GPU, "Required shader format for backend %s not provided!", gpudriver);
                     return NULL;
                 }
@@ -440,8 +440,8 @@ static const SDL_GPUBootstrap *SDL_GPUSelectBackend(SDL_PropertiesID props)
     SDL_LogError(SDL_LOG_CATEGORY_GPU, "No GPU driver hint set. Trying all available backends...");
     for (i = 0; backends[i]; i += 1) {
         SDL_Log("%s\n", backends[i]->name);
-        SDL_Log("Expected Flags: %u", format_flags);
-        SDL_Log("Backend Flags: %u", backends[i]->shader_formats);
+        /*SDL_Log("Expected Flags: %u", format_flags);*/
+        /*SDL_Log("Backend Flags: %u", backends[i]->shader_formats);*/
         if ((backends[i]->shader_formats & format_flags) == 0) {
             // Don't select a backend which doesn't support the app's shaders.
             continue;
@@ -2533,7 +2533,7 @@ void SDL_BlitGPUTexture(
             failed = true;
         }
         if (info->source.w == 0 || info->source.h == 0 || info->destination.w == 0 || info->destination.h == 0) {
-            SDL_Log("%d %d %d %d", info->source.w, info->source.h, info->destination.w, info->destination.h);
+            /*SDL_Log("%d %d %d %d", info->source.w, info->source.h, info->destination.w, info->destination.h);*/
             SDL_assert_release(!"Blit source/destination regions must have non-zero width, height, and depth");
             failed = true;
         }
