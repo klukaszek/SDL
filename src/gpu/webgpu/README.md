@@ -1,7 +1,7 @@
 # SDL3 GPU WebGPU Backend
 Status: Work In Progress
 
-Any general questions about this should probably be directed to kylelukaszek@gmail.com since I wrote most of the base implementation.
+Any general questions about this should probably be directed to kylelukaszek [at] gmail [dot] com since I wrote most of the base implementation.
 
 ## Compiling with Emscripten
 **Emscripten version 3.1.69+ is required to make use of SDL3 WebGPU.**
