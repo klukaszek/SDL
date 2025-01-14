@@ -190,7 +190,7 @@ macro(add_sdl_test_executable TARGET)
     elseif(EMSCRIPTEN)
         set_property(TARGET ${TARGET} PROPERTY SUFFIX ".html")
         target_link_options(${TARGET} PRIVATE "SHELL:--pre-js ${CMAKE_CURRENT_SOURCE_DIR}/emscripten/pre.js")
-        target_link_options(${TARGET} PRIVATE "-sEXIT_RUNTIME=1 -sUSE_WEBGPU")
+        target_link_options(${TARGET} PRIVATE "-sUSE_WEBGPU -sEXIT_RUNTIME=1")
         set_property(TARGET ${TARGET} APPEND PROPERTY LINK_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/emscripten/pre.js")
     endif()
 
