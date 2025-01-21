@@ -1285,25 +1285,6 @@ static SDL_GPUBuffer *WebGPU_INTERNAL_CreateGPUBuffer(SDL_GPURenderer *driverDat
     return (SDL_GPUBuffer *)buffer;
 }
 
-static SDL_GPUBuffer *WebGPU_CreateGPUBuffer(SDL_GPURenderer *driverData,
-                                             SDL_GPUBufferUsageFlags usageFlags,
-                                             Uint32 size)
-{
-    return WebGPU_INTERNAL_CreateGPUBuffer(driverData, (void *)&usageFlags, size, WEBGPU_BUFFER_TYPE_GPU);
-}
-
-static void WebGPU_ReleaseBuffer(SDL_GPURenderer *driverData, SDL_GPUBuffer *buffer)
-{
-    WebGPUBuffer *webgpuBuffer = (WebGPUBuffer *)buffer;
-
-    // if reference count == 0, release the buffer
-    if (SDL_GetAtomicInt(&webgpuBuffer->referenceCount) == 0) {
-        wgpuBufferRelease(webgpuBuffer->buffer);
-    }
-
-    SDL_free(webgpuBuffer);
-}
-
 static void WebGPU_SetBufferName(SDL_GPURenderer *driverData,
                                  SDL_GPUBuffer *buffer,
                                  const char *text)
@@ -1327,13 +1308,43 @@ static void WebGPU_SetBufferName(SDL_GPURenderer *driverData,
     wgpuBufferSetLabel(webgpuBuffer->buffer, text);
 }
 
+
+static SDL_GPUBuffer *WebGPU_CreateGPUBuffer(SDL_GPURenderer *driverData,
+                                             SDL_GPUBufferUsageFlags usageFlags,
+                                             Uint32 size,
+                                             const char *debugName)
+{
+    SDL_GPUBuffer *buffer = WebGPU_INTERNAL_CreateGPUBuffer(driverData, (void *)&usageFlags, size, WEBGPU_BUFFER_TYPE_GPU);
+    if (debugName) {
+        WebGPU_SetBufferName(driverData, buffer, debugName);
+    }
+    return buffer;
+}
+
+static void WebGPU_ReleaseBuffer(SDL_GPURenderer *driverData, SDL_GPUBuffer *buffer)
+{
+    WebGPUBuffer *webgpuBuffer = (WebGPUBuffer *)buffer;
+
+    // if reference count == 0, release the buffer
+    if (SDL_GetAtomicInt(&webgpuBuffer->referenceCount) == 0) {
+        wgpuBufferRelease(webgpuBuffer->buffer);
+    }
+
+    SDL_free(webgpuBuffer);
+}
+
 static SDL_GPUTransferBuffer *WebGPU_CreateTransferBuffer(
     SDL_GPURenderer *driverData,
     SDL_GPUTransferBufferUsage usage, // ignored on Vulkan
-    Uint32 size)
+    Uint32 size,
+    const char *debugName)
 {
     SDL_GPUBuffer *buffer = WebGPU_INTERNAL_CreateGPUBuffer(driverData, &usage, size, WEBGPU_BUFFER_TYPE_TRANSFER);
-    WebGPU_SetBufferName(driverData, buffer, "Transfer Buffer");
+    if (debugName) {
+    WebGPU_SetBufferName(driverData, buffer, debugName);
+    } else {
+        WebGPU_SetBufferName(driverData, buffer, "SDLGPU Transfer Buffer");
+    }
     return (SDL_GPUTransferBuffer *)buffer;
 }
 
@@ -2201,14 +2212,151 @@ static void WebGPU_EndCopyPass(SDL_GPUCommandBuffer *commandBuffer)
 
 bool WebGPU_INTERNAL_CreateSurface(WebGPURenderer *renderer, WindowData *windowData)
 {
-    WGPUSurfaceDescriptorFromCanvasHTMLSelector canvas_desc = {
-        .chain.sType = WGPUSType_SurfaceDescriptorFromCanvasHTMLSelector,
-        .selector = "#canvas",
+    if (!renderer || !windowData) {
+        SDL_LogError(SDL_LOG_CATEGORY_GPU, "Invalid parameters for creating surface");
+        return false;
+    }
+
+    WGPUSurfaceDescriptor surfaceDescriptor = {
+        .label = "SDL_GPU Swapchain Surface",
     };
-    WGPUSurfaceDescriptor surf_desc = {
-        .nextInChain = &canvas_desc.chain,
-    };
-    windowData->swapchainData->surface = wgpuInstanceCreateSurface(renderer->instance, &surf_desc);
+
+#if defined(SDL_PLATFORM_MACOS)
+    {
+        id metal_layer = NULL;
+        NSWindow *ns_window = (__bridge NSWindow *)SDL_GetPointerProperty(props, SDL_PROP_WINDOW_COCOA_WINDOW_POINTER, NULL);
+        if (!ns_window)
+            return NULL;
+        [ns_window.contentView setWantsLayer:YES];
+        metal_layer = [CAMetalLayer layer];
+        [ns_window.contentView setLayer:metal_layer];
+
+#ifdef WEBGPU_BACKEND_DAWN
+        WGPUSurfaceSourceMetalLayer fromMetalLayer;
+        fromMetalLayer.chain.sType = WGPUSType_SurfaceSourceMetalLayer;
+#else
+        WGPUSurfaceDescriptorFromMetalLayer fromMetalLayer;
+        fromMetalLayer.chain.sType = WGPUSType_SurfaceDescriptorFromMetalLayer;
+#endif
+        fromMetalLayer.chain.next = NULL;
+        fromMetalLayer.layer = metal_layer;
+
+        surfaceDescriptor.nextInChain = &fromMetalLayer.chain;
+        surfaceDescriptor.label = NULL;
+    }
+#elif defined(SDL_PLATFORM_IOS)
+    {
+        UIWindow *ui_window = (__bridge UIWindow *)SDL_GetPointerProperty(props, SDL_PROP_WINDOW_UIKIT_WINDOW_POINTER, NULL);
+        if (!uiwindow)
+            return NULL;
+
+        UIView *ui_view = ui_window.rootViewController.view;
+        CAMetalLayer *metal_layer = [CAMetalLayer new];
+        metal_layer.opaque = true;
+        metal_layer.frame = ui_view.frame;
+        metal_layer.drawableSize = ui_view.frame.size;
+
+        [ui_view.layer addSublayer:metal_layer];
+
+#ifdef WEBGPU_BACKEND_DAWN
+        WGPUSurfaceSourceMetalLayer fromMetalLayer;
+        fromMetalLayer.chain.sType = WGPUSType_SurfaceSourceMetalLayer;
+#else
+        WGPUSurfaceDescriptorFromMetalLayer fromMetalLayer;
+        fromMetalLayer.chain.sType = WGPUSType_SurfaceDescriptorFromMetalLayer;
+#endif
+        fromMetalLayer.chain.next = NULL;
+        fromMetalLayer.layer = metal_layer;
+
+        surfaceDescriptor.nextInChain = &fromMetalLayer.chain;
+        surfaceDescriptor.label = NULL;
+    }
+#elif defined(SDL_PLATFORM_LINUX)
+/*#if defined(SDL_VIDEO_DRIVER_X11)*/
+/*    if (SDL_strcmp(SDL_GetCurrentVideoDriver(), "x11") == 0) {*/
+/*        Display *x11_display = (Display *)SDL_GetPointerProperty(props, SDL_PROP_WINDOW_X11_DISPLAY_POINTER, NULL);*/
+/*        Window x11_window = (Window)SDL_GetNumberProperty(props, SDL_PROP_WINDOW_X11_WINDOW_NUMBER, 0);*/
+/*        if (!x11_display || !x11_window)*/
+/*            return NULL;*/
+/**/
+/*#ifdef WEBGPU_BACKEND_DAWN*/
+/*        WGPUSurfaceSourceXlibWindow fromXlibWindow;*/
+/*        fromXlibWindow.chain.sType = WGPUSType_SurfaceSourceXlibWindow;*/
+/*#else*/
+/*        WGPUSurfaceDescriptorFromXlibWindow fromXlibWindow;*/
+/*        fromXlibWindow.chain.sType = WGPUSType_SurfaceDescriptorFromXlibWindow;*/
+/*#endif*/
+/*        fromXlibWindow.chain.next = NULL;*/
+/*        fromXlibWindow.display = x11_display;*/
+/*        fromXlibWindow.window = x11_window;*/
+/**/
+/*        surfaceDescriptor.nextInChain = &fromXlibWindow.chain;*/
+/*        surfaceDescriptor.label = NULL;*/
+/*    }*/
+/*#endif // defined(SDL_VIDEO_DRIVER_X11)*/
+/*#if defined(SDL_VIDEO_DRIVER_WAYLAND)*/
+/*    else if (SDL_strcmp(SDL_GetCurrentVideoDriver(), "wayland") == 0) {*/
+/*        struct wl_display *wayland_display = (struct wl_display *)SDL_GetPointerProperty(props, SDL_PROP_WINDOW_WAYLAND_DISPLAY_POINTER, NULL);*/
+/*        struct wl_surface *wayland_surface = (struct wl_surface *)SDL_GetPointerProperty(props, SDL_PROP_WINDOW_WAYLAND_SURFACE_POINTER, NULL);*/
+/*        if (!wayland_display || !wayland_surface)*/
+/*            return NULL;*/
+/**/
+/*#ifdef WEBGPU_BACKEND_DAWN*/
+/*        WGPUSurfaceSourceWaylandSurface fromWaylandSurface;*/
+/*        fromWaylandSurface.chain.sType = WGPUSType_SurfaceSourceWaylandSurface;*/
+/*#else*/
+/*        WGPUSurfaceDescriptorFromWaylandSurface fromWaylandSurface;*/
+/*        fromWaylandSurface.chain.sType = WGPUSType_SurfaceDescriptorFromWaylandSurface;*/
+/*#endif*/
+/*        fromWaylandSurface.chain.next = NULL;*/
+/*        fromWaylandSurface.display = wayland_display;*/
+/*        fromWaylandSurface.surface = wayland_surface;*/
+/**/
+/*        surfaceDescriptor.nextInChain = &fromWaylandSurface.chain;*/
+/*        surfaceDescriptor.label = NULL;*/
+/*    }*/
+/*#endif // defined(SDL_VIDEO_DRIVER_WAYLAND)*/
+#elif defined(SDL_PLATFORM_WIN32)
+    {
+        HWND hwnd = (HWND)SDL_GetPointerProperty(props, SDL_PROP_WINDOW_WIN32_HWND_POINTER, NULL);
+        if (!hwnd)
+            return NULL;
+        HINSTANCE hinstance = GetModuleHandle(NULL);
+
+#ifdef WEBGPU_BACKEND_DAWN
+        WGPUSurfaceSourceWindowsHWND fromWindowsHWND;
+        fromWindowsHWND.chain.sType = WGPUSType_SurfaceSourceWindowsHWND;
+#else
+        WGPUSurfaceDescriptorFromWindowsHWND fromWindowsHWND;
+        fromWindowsHWND.chain.sType = WGPUSType_SurfaceDescriptorFromWindowsHWND;
+#endif
+        fromWindowsHWND.chain.next = NULL;
+        fromWindowsHWND.hinstance = hinstance;
+        fromWindowsHWND.hwnd = hwnd;
+
+        surfaceDescriptor.nextInChain = &fromWindowsHWND.chain;
+        surfaceDescriptor.label = NULL;
+    }
+#elif defined(__EMSCRIPTEN__)
+    {
+#ifdef WEBGPU_BACKEND_DAWN
+        WGPUSurfaceSourceCanvasHTMLSelector_Emscripten fromCanvasHTMLSelector;
+        fromCanvasHTMLSelector.chain.sType = WGPUSType_SurfaceSourceCanvasHTMLSelector_Emscripten;
+#else
+        WGPUSurfaceDescriptorFromCanvasHTMLSelector fromCanvasHTMLSelector;
+        fromCanvasHTMLSelector.chain.sType = WGPUSType_SurfaceDescriptorFromCanvasHTMLSelector;
+#endif
+        fromCanvasHTMLSelector.chain.next = NULL;
+        fromCanvasHTMLSelector.selector = "#canvas";
+        SDL_Log("Creating surface from canvas selector %s", fromCanvasHTMLSelector.selector);
+
+        surfaceDescriptor.nextInChain = &fromCanvasHTMLSelector.chain;
+        surfaceDescriptor.label = NULL;
+    }
+#else
+#error "Unsupported WGPU_TARGET"
+#endif
+    windowData->swapchainData->surface = wgpuInstanceCreateSurface(renderer->instance, &surfaceDescriptor);
     return windowData->swapchainData->surface != NULL;
 }
 
