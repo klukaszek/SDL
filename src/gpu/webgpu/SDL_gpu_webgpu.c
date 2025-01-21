@@ -292,7 +292,7 @@ typedef struct WindowData
     SDL_Window *window;
     SDL_GPUSwapchainComposition swapchainComposition;
     SDL_GPUPresentMode presentMode;
-    WebGPUSwapchainData *swapchainData;
+    WebGPUSwapchainData swapchainData;
     bool needsSwapchainRecreate;
 } WindowData;
 
@@ -2221,6 +2221,9 @@ bool WebGPU_INTERNAL_CreateSurface(WebGPURenderer *renderer, WindowData *windowD
         .label = "SDL_GPU Swapchain Surface",
     };
 
+// Slightly altered, though with permission by Elie Michel:
+// @ https://github.com/eliemichel/sdl3webgpu/blob/main/sdl3webgpu.c
+// https://github.com/libsdl-org/SDL/issues/10768#issuecomment-2499532299
 #if defined(SDL_PLATFORM_MACOS)
     {
         id metal_layer = NULL;
@@ -2272,50 +2275,50 @@ bool WebGPU_INTERNAL_CreateSurface(WebGPURenderer *renderer, WindowData *windowD
         surfaceDescriptor.label = NULL;
     }
 #elif defined(SDL_PLATFORM_LINUX)
-/*#if defined(SDL_VIDEO_DRIVER_X11)*/
-/*    if (SDL_strcmp(SDL_GetCurrentVideoDriver(), "x11") == 0) {*/
-/*        Display *x11_display = (Display *)SDL_GetPointerProperty(props, SDL_PROP_WINDOW_X11_DISPLAY_POINTER, NULL);*/
-/*        Window x11_window = (Window)SDL_GetNumberProperty(props, SDL_PROP_WINDOW_X11_WINDOW_NUMBER, 0);*/
-/*        if (!x11_display || !x11_window)*/
-/*            return NULL;*/
-/**/
-/*#ifdef WEBGPU_BACKEND_DAWN*/
-/*        WGPUSurfaceSourceXlibWindow fromXlibWindow;*/
-/*        fromXlibWindow.chain.sType = WGPUSType_SurfaceSourceXlibWindow;*/
-/*#else*/
-/*        WGPUSurfaceDescriptorFromXlibWindow fromXlibWindow;*/
-/*        fromXlibWindow.chain.sType = WGPUSType_SurfaceDescriptorFromXlibWindow;*/
-/*#endif*/
-/*        fromXlibWindow.chain.next = NULL;*/
-/*        fromXlibWindow.display = x11_display;*/
-/*        fromXlibWindow.window = x11_window;*/
-/**/
-/*        surfaceDescriptor.nextInChain = &fromXlibWindow.chain;*/
-/*        surfaceDescriptor.label = NULL;*/
-/*    }*/
-/*#endif // defined(SDL_VIDEO_DRIVER_X11)*/
-/*#if defined(SDL_VIDEO_DRIVER_WAYLAND)*/
-/*    else if (SDL_strcmp(SDL_GetCurrentVideoDriver(), "wayland") == 0) {*/
-/*        struct wl_display *wayland_display = (struct wl_display *)SDL_GetPointerProperty(props, SDL_PROP_WINDOW_WAYLAND_DISPLAY_POINTER, NULL);*/
-/*        struct wl_surface *wayland_surface = (struct wl_surface *)SDL_GetPointerProperty(props, SDL_PROP_WINDOW_WAYLAND_SURFACE_POINTER, NULL);*/
-/*        if (!wayland_display || !wayland_surface)*/
-/*            return NULL;*/
-/**/
-/*#ifdef WEBGPU_BACKEND_DAWN*/
-/*        WGPUSurfaceSourceWaylandSurface fromWaylandSurface;*/
-/*        fromWaylandSurface.chain.sType = WGPUSType_SurfaceSourceWaylandSurface;*/
-/*#else*/
-/*        WGPUSurfaceDescriptorFromWaylandSurface fromWaylandSurface;*/
-/*        fromWaylandSurface.chain.sType = WGPUSType_SurfaceDescriptorFromWaylandSurface;*/
-/*#endif*/
-/*        fromWaylandSurface.chain.next = NULL;*/
-/*        fromWaylandSurface.display = wayland_display;*/
-/*        fromWaylandSurface.surface = wayland_surface;*/
-/**/
-/*        surfaceDescriptor.nextInChain = &fromWaylandSurface.chain;*/
-/*        surfaceDescriptor.label = NULL;*/
-/*    }*/
-/*#endif // defined(SDL_VIDEO_DRIVER_WAYLAND)*/
+#if defined(SDL_VIDEO_DRIVER_X11)
+    if (SDL_strcmp(SDL_GetCurrentVideoDriver(), "x11") == 0) {
+        Display *x11_display = (Display *)SDL_GetPointerProperty(props, SDL_PROP_WINDOW_X11_DISPLAY_POINTER, NULL);
+        Window x11_window = (Window)SDL_GetNumberProperty(props, SDL_PROP_WINDOW_X11_WINDOW_NUMBER, 0);
+        if (!x11_display || !x11_window)
+            return NULL;
+
+#ifdef WEBGPU_BACKEND_DAWN
+        WGPUSurfaceSourceXlibWindow fromXlibWindow;
+        fromXlibWindow.chain.sType = WGPUSType_SurfaceSourceXlibWindow;
+#else
+        WGPUSurfaceDescriptorFromXlibWindow fromXlibWindow;
+        fromXlibWindow.chain.sType = WGPUSType_SurfaceDescriptorFromXlibWindow;
+#endif
+        fromXlibWindow.chain.next = NULL;
+        fromXlibWindow.display = x11_display;
+        fromXlibWindow.window = x11_window;
+
+        surfaceDescriptor.nextInChain = &fromXlibWindow.chain;
+        surfaceDescriptor.label = NULL;
+    }
+#endif // defined(SDL_VIDEO_DRIVER_X11)
+#if defined(SDL_VIDEO_DRIVER_WAYLAND)
+    else if (SDL_strcmp(SDL_GetCurrentVideoDriver(), "wayland") == 0) {
+        struct wl_display *wayland_display = (struct wl_display *)SDL_GetPointerProperty(props, SDL_PROP_WINDOW_WAYLAND_DISPLAY_POINTER, NULL);
+        struct wl_surface *wayland_surface = (struct wl_surface *)SDL_GetPointerProperty(props, SDL_PROP_WINDOW_WAYLAND_SURFACE_POINTER, NULL);
+        if (!wayland_display || !wayland_surface)
+            return NULL;
+
+#ifdef WEBGPU_BACKEND_DAWN
+        WGPUSurfaceSourceWaylandSurface fromWaylandSurface;
+        fromWaylandSurface.chain.sType = WGPUSType_SurfaceSourceWaylandSurface;
+#else
+        WGPUSurfaceDescriptorFromWaylandSurface fromWaylandSurface;
+        fromWaylandSurface.chain.sType = WGPUSType_SurfaceDescriptorFromWaylandSurface;
+#endif
+        fromWaylandSurface.chain.next = NULL;
+        fromWaylandSurface.display = wayland_display;
+        fromWaylandSurface.surface = wayland_surface;
+
+        surfaceDescriptor.nextInChain = &fromWaylandSurface.chain;
+        surfaceDescriptor.label = NULL;
+    }
+#endif // defined(SDL_VIDEO_DRIVER_WAYLAND)
 #elif defined(SDL_PLATFORM_WIN32)
     {
         HWND hwnd = (HWND)SDL_GetPointerProperty(props, SDL_PROP_WINDOW_WIN32_HWND_POINTER, NULL);
@@ -2356,14 +2359,12 @@ bool WebGPU_INTERNAL_CreateSurface(WebGPURenderer *renderer, WindowData *windowD
 #else
 #error "Unsupported WGPU_TARGET"
 #endif
-    windowData->swapchainData->surface = wgpuInstanceCreateSurface(renderer->instance, &surfaceDescriptor);
-    return windowData->swapchainData->surface != NULL;
+    windowData->swapchainData.surface = wgpuInstanceCreateSurface(renderer->instance, &surfaceDescriptor);
+    return windowData->swapchainData.surface != NULL;
 }
 
 static void WebGPU_CreateSwapchain(WebGPURenderer *renderer, WindowData *windowData)
 {
-    windowData->swapchainData = SDL_calloc(1, sizeof(WebGPUSwapchainData));
-
     SDL_assert(WebGPU_INTERNAL_CreateSurface(renderer, windowData));
 
     WGPUSurfaceDescriptorFromCanvasHTMLSelector canvas_desc = {
@@ -2374,9 +2375,9 @@ static void WebGPU_CreateSwapchain(WebGPURenderer *renderer, WindowData *windowD
         .nextInChain = &canvas_desc.chain,
         .label = "SDL_GPU Swapchain Surface",
     };
-    windowData->swapchainData->surface = wgpuInstanceCreateSurface(renderer->instance, &surf_desc);
 
-    WebGPUSwapchainData *swapchainData = windowData->swapchainData;
+    WebGPUSwapchainData *swapchainData = &windowData->swapchainData;
+    swapchainData->surface = wgpuInstanceCreateSurface(renderer->instance, &surf_desc);
     swapchainData->format = wgpuSurfaceGetPreferredFormat(swapchainData->surface, renderer->adapter);
     swapchainData->presentMode = SDLToWGPUPresentMode(windowData->presentMode);
 
@@ -2384,6 +2385,10 @@ static void WebGPU_CreateSwapchain(WebGPURenderer *renderer, WindowData *windowD
     swapchainData->width = windowData->window->w;
     swapchainData->height = windowData->window->h;
     swapchainData->sampleCount = 1;
+    swapchainData->msaaView = NULL;
+    swapchainData->msaaTexture = NULL;
+    swapchainData->depthStencilView = NULL;
+    swapchainData->depthStencilTexture = NULL;
 
     // Emscripten WebGPU swapchain
     WGPUSwapChainDescriptor swapchainDesc = {
@@ -2447,7 +2452,7 @@ static SDL_GPUTextureFormat WebGPU_GetSwapchainTextureFormat(
     SDL_Window *window)
 {
     WindowData *windowData = WebGPU_INTERNAL_FetchWindowData(window);
-    WebGPUSwapchainData *swapchainData = windowData->swapchainData;
+    WebGPUSwapchainData *swapchainData = &windowData->swapchainData;
 
     return WGPUToSDLTextureFormat(swapchainData->format);
 }
@@ -2478,13 +2483,11 @@ static void WebGPU_DestroySwapchain(WebGPUSwapchainData *swapchainData)
         wgpuSurfaceRelease(swapchainData->surface);
         swapchainData->surface = NULL;
     }
-
-    SDL_free(swapchainData);
 }
 
 static void WebGPU_RecreateSwapchain(WebGPURenderer *renderer, WindowData *windowData)
 {
-    WebGPU_DestroySwapchain(windowData->swapchainData);
+    WebGPU_DestroySwapchain(&windowData->swapchainData);
     WebGPU_CreateSwapchain(renderer, windowData);
     windowData->needsSwapchainRecreate = false;
 }
@@ -2499,12 +2502,12 @@ static bool WebGPU_AcquireSwapchainTexture(
     WebGPUCommandBuffer *wgpu_cmd_buf = (WebGPUCommandBuffer *)commandBuffer;
     WebGPURenderer *renderer = wgpu_cmd_buf->renderer;
     WindowData *windowData = WebGPU_INTERNAL_FetchWindowData(window);
-    WebGPUSwapchainData *swapchainData = windowData->swapchainData;
+    WebGPUSwapchainData *swapchainData = &windowData->swapchainData;
 
     // Check if the swapchain needs to be recreated
     if (windowData->needsSwapchainRecreate) {
         WebGPU_RecreateSwapchain(renderer, windowData);
-        swapchainData = windowData->swapchainData;
+        swapchainData = &windowData->swapchainData;
 
         if (swapchainData == NULL) {
             SDL_LogError(SDL_LOG_CATEGORY_GPU, "Failed to recreate swapchain");
@@ -2695,7 +2698,7 @@ static bool WebGPU_ClaimWindow(
 
         WebGPU_CreateSwapchain(renderer, windowData);
 
-        if (windowData->swapchainData != NULL) {
+        if (windowData->swapchainData.surface) {
             SDL_SetPointerProperty(SDL_GetWindowProperties(window), WINDOW_PROPERTY_DATA, windowData);
 
             if (renderer->claimedWindowCount >= renderer->claimedWindowCapacity) {
@@ -2736,8 +2739,8 @@ static void WebGPU_ReleaseWindow(SDL_GPURenderer *driverData, SDL_Window *window
     }
 
     // Destroy the swapchain
-    if (windowData->swapchainData) {
-        WebGPU_DestroySwapchain(windowData->swapchainData);
+    if (windowData->swapchainData.surface) {
+        WebGPU_DestroySwapchain(&windowData->swapchainData);
     }
 
     // Eliminate the window from the claimed windows
@@ -3777,8 +3780,8 @@ void WebGPU_SetViewport(SDL_GPUCommandBuffer *renderPass, const SDL_GPUViewport 
 
     WebGPUCommandBuffer *commandBuffer = (WebGPUCommandBuffer *)renderPass;
 
-    Uint32 window_width = commandBuffer->renderer->claimedWindows[0]->swapchainData->width;
-    Uint32 window_height = commandBuffer->renderer->claimedWindows[0]->swapchainData->height;
+    Uint32 window_width = commandBuffer->renderer->claimedWindows[0]->swapchainData.width;
+    Uint32 window_height = commandBuffer->renderer->claimedWindows[0]->swapchainData.height;
     WebGPUViewport *wgpuViewport = &commandBuffer->currentViewport;
 
     float max_viewport_width = (float)window_width - viewport->x;
@@ -3805,8 +3808,8 @@ void WebGPU_SetScissorRect(SDL_GPUCommandBuffer *renderPass, const SDL_Rect *sci
 
     WebGPUCommandBuffer *commandBuffer = (WebGPUCommandBuffer *)renderPass;
 
-    Uint32 window_width = commandBuffer->renderer->claimedWindows[0]->swapchainData->width;
-    Uint32 window_height = commandBuffer->renderer->claimedWindows[0]->swapchainData->height;
+    Uint32 window_width = commandBuffer->renderer->claimedWindows[0]->swapchainData.width;
+    Uint32 window_height = commandBuffer->renderer->claimedWindows[0]->swapchainData.height;
 
     Uint32 max_scissor_width = window_width - scissorRect->x;
     Uint32 max_scissor_height = window_height - scissorRect->y;
