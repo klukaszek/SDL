@@ -649,13 +649,13 @@ static WGPUTextureUsageFlags SDLToWGPUTextureUsageFlags(SDL_GPUTextureUsageFlags
         wgpuFlags |= WGPUTextureUsage_RenderAttachment;
     }
     if (usageFlags & SDL_GPU_TEXTUREUSAGE_GRAPHICS_STORAGE_READ) {
-        wgpuFlags |= WGPUTextureUsage_StorageBinding;
+        wgpuFlags |= WGPUTextureUsage_StorageBinding | WGPUTextureUsage_CopyDst;
     }
     if (usageFlags & SDL_GPU_TEXTUREUSAGE_COMPUTE_STORAGE_READ) {
-        wgpuFlags |= WGPUTextureUsage_StorageBinding | WGPUTextureUsage_CopySrc;
+        wgpuFlags |= WGPUTextureUsage_StorageBinding | WGPUTextureUsage_CopyDst;
     }
     if (usageFlags & SDL_GPU_TEXTUREUSAGE_COMPUTE_STORAGE_WRITE) {
-        wgpuFlags |= WGPUTextureUsage_StorageBinding | WGPUTextureUsage_CopyDst;
+        wgpuFlags |= WGPUTextureUsage_StorageBinding | WGPUTextureUsage_CopySrc;
     }
     if (usageFlags & SDL_GPU_TEXTUREUSAGE_COMPUTE_STORAGE_SIMULTANEOUS_READ_WRITE) {
         wgpuFlags |= WGPUTextureUsage_StorageBinding | WGPUTextureUsage_CopySrc | WGPUTextureUsage_CopyDst;
@@ -829,11 +829,9 @@ static Uint32 SDLToWGPUSampleCount(SDL_GPUSampleCount samples)
     case SDL_GPU_SAMPLECOUNT_1:
         return 1;
     case SDL_GPU_SAMPLECOUNT_2:
-        return 2;
     case SDL_GPU_SAMPLECOUNT_4:
-        return 4;
     case SDL_GPU_SAMPLECOUNT_8:
-        return 8;
+        return 4;
     default:
         return 1;
     }
@@ -1278,7 +1276,6 @@ static void WebGPU_SetBufferName(SDL_GPURenderer *driverData,
     wgpuBufferSetLabel(webgpuBuffer->buffer, text);
 }
 
-
 static SDL_GPUBuffer *WebGPU_CreateGPUBuffer(SDL_GPURenderer *driverData,
                                              SDL_GPUBufferUsageFlags usageFlags,
                                              Uint32 size,
@@ -1311,7 +1308,7 @@ static SDL_GPUTransferBuffer *WebGPU_CreateTransferBuffer(
 {
     SDL_GPUBuffer *buffer = WebGPU_INTERNAL_CreateGPUBuffer(driverData, &usage, size, WEBGPU_BUFFER_TYPE_TRANSFER);
     if (debugName) {
-    WebGPU_SetBufferName(driverData, buffer, debugName);
+        WebGPU_SetBufferName(driverData, buffer, debugName);
     } else {
         WebGPU_SetBufferName(driverData, buffer, "SDLGPU Transfer Buffer");
     }
@@ -2357,15 +2354,15 @@ static void WebGPU_CreateSwapchain(WebGPURenderer *renderer, WindowData *windowD
 
     swapchainData->format = wgpuSurfaceGetPreferredFormat(swapchainData->surface, renderer->adapter);
     swapchainData->presentMode = SDLToWGPUPresentMode(windowData->presentMode);
-    wgpuSurfaceConfigure(swapchainData->surface,  &(WGPUSurfaceConfiguration){
-        .usage = WGPUTextureUsage_RenderAttachment | WGPUTextureUsage_CopySrc | WGPUTextureUsage_CopyDst,
-        .format = swapchainData->format,
-        .width = windowData->window->w,
-        .height = windowData->window->h,
-        .presentMode = swapchainData->presentMode,
-        .alphaMode = WGPUCompositeAlphaMode_Opaque,
-        .device = renderer->device,
-    });
+    wgpuSurfaceConfigure(swapchainData->surface, &(WGPUSurfaceConfiguration){
+                                                     .usage = WGPUTextureUsage_RenderAttachment | WGPUTextureUsage_CopySrc | WGPUTextureUsage_CopyDst,
+                                                     .format = swapchainData->format,
+                                                     .width = windowData->window->w,
+                                                     .height = windowData->window->h,
+                                                     .presentMode = swapchainData->presentMode,
+                                                     .alphaMode = WGPUCompositeAlphaMode_Opaque,
+                                                     .device = renderer->device,
+                                                 });
 
     // Swapchain should be the size of whatever SDL_Window it is attached to
     swapchainData->width = windowData->window->w;
@@ -2469,21 +2466,21 @@ static WGPUTexture WebGPU_INTERNAL_AcquireSurfaceTexture(WebGPURenderer *rendere
     wgpuSurfaceGetCurrentTexture(windowData->swapchainData.surface, &surfaceTexture);
 
     switch (surfaceTexture.status) {
-        case WGPUSurfaceGetCurrentTextureStatus_Success:
-            break;
-        case WGPUSurfaceGetCurrentTextureStatus_DeviceLost:
-            SDL_LogError(SDL_LOG_CATEGORY_GPU, "GPU DEVICE LOST");
-            SDL_SetError("GPU DEVICE LOST");
-            return NULL;
-        case WGPUSurfaceGetCurrentTextureStatus_OutOfMemory:
-            SDL_OutOfMemory();
-            return NULL;
-        case WGPUSurfaceGetCurrentTextureStatus_Timeout:
-        case WGPUSurfaceGetCurrentTextureStatus_Outdated:
-        case WGPUSurfaceGetCurrentTextureStatus_Lost:
-        default:
-            WebGPU_RecreateSwapchain(renderer, windowData);
-            return NULL;
+    case WGPUSurfaceGetCurrentTextureStatus_Success:
+        break;
+    case WGPUSurfaceGetCurrentTextureStatus_DeviceLost:
+        SDL_LogError(SDL_LOG_CATEGORY_GPU, "GPU DEVICE LOST");
+        SDL_SetError("GPU DEVICE LOST");
+        return NULL;
+    case WGPUSurfaceGetCurrentTextureStatus_OutOfMemory:
+        SDL_OutOfMemory();
+        return NULL;
+    case WGPUSurfaceGetCurrentTextureStatus_Timeout:
+    case WGPUSurfaceGetCurrentTextureStatus_Outdated:
+    case WGPUSurfaceGetCurrentTextureStatus_Lost:
+    default:
+        WebGPU_RecreateSwapchain(renderer, windowData);
+        return NULL;
     }
 
     return surfaceTexture.texture;
@@ -2610,17 +2607,19 @@ static bool WebGPU_SupportsSampleCount(SDL_GPURenderer *driverData,
 {
     (void)driverData;
     WGPUTextureFormat wgpuFormat = SDLToWGPUTextureFormat(format);
-    Uint32 wgpuSampleCount = SDLToWGPUSampleCount(desiredSampleCount);
-
     // Verify that the format and sample count are considered valid
     if (wgpuFormat == WGPUTextureFormat_Undefined) {
         return false;
     }
 
+    SDL_Log("Desired sample count %u", desiredSampleCount);
+
     // WebGPU only supports 1 and 4.
-    if (wgpuSampleCount != 1 && wgpuSampleCount != 4) {
+    if (desiredSampleCount != SDL_GPU_SAMPLECOUNT_1 && desiredSampleCount != SDL_GPU_SAMPLECOUNT_4) {
         return false;
     }
+
+    /*Uint32 wgpuSampleCount = SDLToWGPUSampleCount(desiredSampleCount);*/
 
     // Sample count is valid.
     return true;
@@ -3297,6 +3296,13 @@ static SDL_GPUGraphicsPipeline *WebGPU_CreateGraphicsPipeline(
         SDL_Log("TODO: Implement specific pipeline setup to emulate line fill mode.");
     }
 
+    Uint32 sampleCount = pipelineCreateInfo->multisample_state.sample_count == 0 ? 1 : pipelineCreateInfo->multisample_state.sample_count;
+    Uint32 sampleMask = pipelineCreateInfo->multisample_state.sample_mask == 0 ? 0xFFFF : pipelineCreateInfo->multisample_state.sample_mask;
+    if (sampleCount != SDL_GPU_SAMPLECOUNT_1 && sampleCount != SDL_GPU_SAMPLECOUNT_4) {
+        SDL_Log("Sample count not supported in WebGPU. Defaulting to 1.");
+        sampleCount = SDL_GPU_SAMPLECOUNT_1;
+    }
+
     // Create the render pipeline descriptor
     WGPURenderPipelineDescriptor pipelineDesc = {
         .nextInChain = NULL,
@@ -3312,8 +3318,8 @@ static SDL_GPUGraphicsPipeline *WebGPU_CreateGraphicsPipeline(
         // Needs to be set up
         .depthStencil = pipelineCreateInfo->target_info.has_depth_stencil_target ? &depthStencil : NULL,
         .multisample = {
-            .count = pipelineCreateInfo->multisample_state.sample_count == 0 ? 1 : pipelineCreateInfo->multisample_state.sample_count,
-            .mask = pipelineCreateInfo->multisample_state.sample_mask == 0 ? 0xFFFF : pipelineCreateInfo->multisample_state.sample_mask,
+            .count = SDLToWGPUSampleCount(sampleCount),
+            .mask = sampleMask,
             .alphaToCoverageEnabled = false,
         },
         .fragment = &fragmentState,
@@ -3827,7 +3833,27 @@ void WebGPU_SetScissorRect(SDL_GPUCommandBuffer *renderPass, const SDL_Rect *sci
 static void WebGPU_SetStencilReference(SDL_GPUCommandBuffer *commandBuffer,
                                        Uint8 reference)
 {
+    if (commandBuffer == NULL) {
+        return;
+    }
+
     wgpuRenderPassEncoderSetStencilReference(((WebGPUCommandBuffer *)commandBuffer)->renderPassEncoder, reference);
+}
+
+static void WebGPU_SetBlendConstants(
+    SDL_GPUCommandBuffer *commandBuffer,
+    SDL_FColor blendConstants)
+{
+    if (commandBuffer == NULL) {
+        return;
+    }
+
+    wgpuRenderPassEncoderSetBlendConstant(((WebGPUCommandBuffer *)commandBuffer)->renderPassEncoder, &(WGPUColor){
+                                                                                                         .r = blendConstants.r,
+                                                                                                         .g = blendConstants.g,
+                                                                                                         .b = blendConstants.b,
+                                                                                                         .a = blendConstants.a,
+                                                                                                     });
 }
 
 static void WebGPU_BindGraphicsPipeline(
@@ -3949,6 +3975,7 @@ static void WebGPU_DrawPrimitives(
     wgpuRenderPassEncoderDraw(wgpu_cmd_buf->renderPassEncoder, vertexCount, instanceCount, firstVertex, firstInstance);
 }
 
+
 static void WebGPU_DrawIndexedPrimitives(
     SDL_GPUCommandBuffer *commandBuffer,
     Uint32 numIndices,
@@ -3957,9 +3984,48 @@ static void WebGPU_DrawIndexedPrimitives(
     Sint32 vertexOffset,
     Uint32 firstInstance)
 {
+    if (commandBuffer == NULL) {
+        return;
+    }
     WebGPUCommandBuffer *wgpu_cmd_buf = (WebGPUCommandBuffer *)commandBuffer;
     WebGPU_INTERNAL_SetBindGroups(commandBuffer);
     wgpuRenderPassEncoderDrawIndexed(wgpu_cmd_buf->renderPassEncoder, numIndices, numInstances, firstIndex, vertexOffset, firstInstance);
+}
+
+static void WebGPU_DrawPrimitivesIndirect(
+    SDL_GPUCommandBuffer *commandBuffer,
+    SDL_GPUBuffer *buffer,
+    Uint32 offset,
+    Uint32 drawCount)
+{
+    if (commandBuffer == NULL) {
+        return;
+    }
+    WebGPUCommandBuffer *wgpu_cmd_buf = (WebGPUCommandBuffer *)commandBuffer;
+    WebGPUBuffer *wgpuBuffer = (WebGPUBuffer *)buffer;
+    Uint32 pitch = sizeof(SDL_GPUIndirectDrawCommand);
+    WebGPU_INTERNAL_SetBindGroups(commandBuffer);
+    for (Uint32 i = 0; i < drawCount; i += 1) {
+        wgpuRenderPassEncoderDrawIndirect(wgpu_cmd_buf->renderPassEncoder, wgpuBuffer->buffer, offset + (i * pitch));
+    }
+}
+
+static void WebGPU_DrawIndexedIndirect(
+    SDL_GPUCommandBuffer *commandBuffer,
+    SDL_GPUBuffer *buffer,
+    Uint32 offset,
+    Uint32 drawCount)
+{
+    if (commandBuffer == NULL) {
+        return;
+    }
+    WebGPUCommandBuffer *wgpu_cmd_buf = (WebGPUCommandBuffer *)commandBuffer;
+    WebGPUBuffer *wgpuBuffer = (WebGPUBuffer *)buffer;
+    Uint32 pitch = sizeof(SDL_GPUIndexedIndirectDrawCommand);
+    WebGPU_INTERNAL_SetBindGroups(commandBuffer);
+    for (Uint32 i = 0; i < drawCount; i += 1) {
+        wgpuRenderPassEncoderDrawIndexedIndirect(wgpu_cmd_buf->renderPassEncoder, wgpuBuffer->buffer, offset + (i * pitch));
+    }
 }
 
 // Blit Functionality Workaround
@@ -4308,6 +4374,52 @@ static void WebGPU_Blit(SDL_GPUCommandBuffer *commandBuffer, const SDL_GPUBlitIn
 
 // ---------------------------------------------------
 
+void WebGPU_GenerateMipmaps(SDL_GPUCommandBuffer *commandBuffer,
+                            SDL_GPUTexture *texture)
+{
+    // We will have to implement our own mipmapping pipeline here.
+    // I suggest Elie Michel's guide on mipmapping: https://eliemichel.github.io/LearnWebGPU/basic-compute/image-processing/mipmap-generation.html
+    SDL_LogError(SDL_LOG_CATEGORY_GPU, "WebGPU mipmapping is not yet implemented");
+}
+
+// ---------------------------------------------------
+
+// Debugging Functionality
+
+void WebGPU_InsertDebugLabel(
+    SDL_GPUCommandBuffer *commandBuffer,
+    const char *text)
+{
+    if (!commandBuffer || !text) {
+        return;
+    }
+    WebGPUCommandBuffer *wgpu_cmd_buf = (WebGPUCommandBuffer *)commandBuffer;
+    wgpuCommandEncoderInsertDebugMarker(wgpu_cmd_buf->commandEncoder, text);
+}
+
+void WebGPU_PushDebugGroup(
+    SDL_GPUCommandBuffer *commandBuffer,
+    const char *text)
+{
+    if (!commandBuffer || !text) {
+        return;
+    }
+    WebGPUCommandBuffer *wgpu_cmd_buf = (WebGPUCommandBuffer *)commandBuffer;
+    wgpuCommandEncoderPushDebugGroup(wgpu_cmd_buf->commandEncoder, text);
+}
+
+void WebGPU_PopDebugGroup(
+    SDL_GPUCommandBuffer *commandBuffer)
+{
+    if (!commandBuffer) {
+        return;
+    }
+    WebGPUCommandBuffer *wgpu_cmd_buf = (WebGPUCommandBuffer *)commandBuffer;
+    wgpuCommandEncoderPopDebugGroup(wgpu_cmd_buf->commandEncoder);
+}
+
+// ---------------------------------------------------
+
 static bool WebGPU_PrepareDriver(SDL_VideoDevice *_this)
 {
     // Realistically, we should check if the browser supports WebGPU here and return false if it doesn't
@@ -4443,11 +4555,16 @@ static SDL_GPUDevice *WebGPU_CreateDevice(bool debug, bool preferLowPower, SDL_P
     result->BindGraphicsPipeline = WebGPU_BindGraphicsPipeline;
     result->ReleaseGraphicsPipeline = WebGPU_ReleaseGraphicsPipeline;
     result->DrawPrimitives = WebGPU_DrawPrimitives;
+    result->DrawPrimitivesIndirect = WebGPU_DrawPrimitivesIndirect;
     result->DrawIndexedPrimitives = WebGPU_DrawIndexedPrimitives;
+    result->DrawIndexedPrimitivesIndirect = WebGPU_DrawIndexedIndirect;
 
     result->SetScissor = WebGPU_SetScissorRect;
     result->SetViewport = WebGPU_SetViewport;
     result->SetStencilReference = WebGPU_SetStencilReference;
+    result->SetBlendConstants = WebGPU_SetBlendConstants;
+
+    result->GenerateMipmaps = WebGPU_GenerateMipmaps;
 
     result->Submit = WebGPU_Submit;
     result->SubmitAndAcquireFence = WebGPU_SubmitAndAcquireFence;
@@ -4460,6 +4577,8 @@ static SDL_GPUDevice *WebGPU_CreateDevice(bool debug, bool preferLowPower, SDL_P
     result->EndRenderPass = WebGPU_EndRenderPass;
     result->BeginCopyPass = WebGPU_BeginCopyPass;
     result->EndCopyPass = WebGPU_EndCopyPass;
+
+    result->InsertDebugLabel = WebGPU_InsertDebugLabel;
 
     renderer->sdlDevice = result;
 
