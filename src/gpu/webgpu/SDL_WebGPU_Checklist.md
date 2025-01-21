@@ -8,8 +8,7 @@ Getting my fork of the example suite merged with the original shouldn't be too m
 The original example suite can be found at:
 - https://github.com/TheSpydog/SDL_gpu_examples/
 
-Currently, the WebGPU backend only supports Emscripten as the compilation target, though it should not be difficult to implement the code provided by @eliemichel. 
-
+Currently, the WebGPU backend only supports Emscripten as the compilation target, though I've added Elie Michel's cross-platform surface configuration logic to the backend. I have not tested it with any native implementations however. 
 
 # Checklist
 
