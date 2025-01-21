@@ -1,4 +1,17 @@
-# SDL WebGPU Driver Function Checklist
+# SDL WebGPU Driver Roadmap / Checklist
+
+These methods are tested by the example suite:
+- https://github.com/klukaszek/SDL3-WebGPU-Examples
+
+Getting my fork of the example suite merged with the original shouldn't be too much work but it needs to tested first.
+
+The original example suite can be found at:
+- https://github.com/TheSpydog/SDL_gpu_examples/
+
+Currently, the WebGPU backend only supports Emscripten as the compilation target, though it should not be difficult to implement the code provided by @eliemichel. 
+
+
+# Checklist
 
 ## General
 - [x] DestroyDevice
@@ -37,8 +50,6 @@ Note: WebGPU has no exposed fence API.
 - [x] UploadToBuffer
 - [x] DownloadFromBuffer
 - [x] CopyBufferToBuffer
-
-Note: All functions are implemented but have not been fully tested for memory correctness. These functions simply worked as expected within the SDL_GPU example suite. Once native support is implemented, I can start running the program through Valgrind.
 
 ## Textures
 - [x] CreateTexture
@@ -98,7 +109,7 @@ Note: All functions are implemented but have not been fully tested for memory co
 - [x] BindFragmentSamplers
 - [ ] BindFragmentStorageTextures
 - [ ] BindFragmentStorageBuffers
-- [ ] PushFragmentUniformData (IN PROGRESS)
+- [ ] PushFragmentUniformData (NEEDS TO BE REVISITED)
 
 ## Vertex Stage
 - [x] BindVertexBuffers
@@ -106,7 +117,7 @@ Note: All functions are implemented but have not been fully tested for memory co
 - [x] BindVertexSamplers
 - [ ] BindVertexStorageTextures
 - [ ] BindVertexStorageBuffers
-- [ ] PushVertexUniformData (IN PROGRESS)
+- [ ] PushVertexUniformData (NEEDS TO BE REVISITED)
 
 ## Rendering States
 - [x] SetViewport
@@ -115,4 +126,4 @@ Note: All functions are implemented but have not been fully tested for memory co
 - [x] SetStencilReference
 
 ## Composition
-- [ ] Blit (IN PROGRESS: Blit2DArray has a sampler issue where the RHS is not downsampled)
+- [ ] Blit (Bug: Example "Blit2DArray" has a sampler issue where the RHS is not downsampled)
