@@ -58,15 +58,17 @@ Note: WebGPU has no exposed fence API.
 - [x] DownloadFromTexture (needs to be tested)
 - [x] CopyTextureToTexture (needs to be tested)
 - [ ] GenerateMipmaps
+    - Requires custom compute pipeline implementation.
+    - https://eliemichel.github.io/LearnWebGPU/basic-compute/image-processing/mipmap-generation.html
 
 ## Samplers
 - [x] CreateSampler
 - [x] ReleaseSampler
 
 ## Debugging
-- [ ] InsertDebugLabel
-- [ ] PushDebugGroup
-- [ ] PopDebugGroup
+- [x] InsertDebugLabel
+- [x] PushDebugGroup
+- [x] PopDebugGroup
 
 ## Graphics Pipelines
 - [x] CreateGraphicsPipeline
@@ -85,10 +87,10 @@ Note: WebGPU has no exposed fence API.
 ## Rendering
 - [x] BeginRenderPass
 - [x] EndRenderPass
-- [ ] DrawPrimitivesIndirect
+- [x] DrawPrimitivesIndirect
 - [x] DrawPrimitives
 - [x] DrawIndexedPrimitives
-- [ ] DrawIndexedPrimitivesIndirect
+- [x] DrawIndexedPrimitivesIndirect
 
 ## Copy Passes
 - [x] BeginCopyPass
@@ -108,7 +110,8 @@ Note: WebGPU has no exposed fence API.
 - [x] BindFragmentSamplers
 - [ ] BindFragmentStorageTextures
 - [ ] BindFragmentStorageBuffers
-- [ ] PushFragmentUniformData (NEEDS TO BE REVISITED)
+- [ ] PushFragmentUniformData
+    - Needs to be rewritten.
 
 ## Vertex Stage
 - [x] BindVertexBuffers
@@ -116,13 +119,18 @@ Note: WebGPU has no exposed fence API.
 - [x] BindVertexSamplers
 - [ ] BindVertexStorageTextures
 - [ ] BindVertexStorageBuffers
-- [ ] PushVertexUniformData (NEEDS TO BE REVISITED)
+- [ ] PushVertexUniformData
+    - Needs to be rewritten.
 
 ## Rendering States
 - [x] SetViewport
 - [x] SetScissor
-- [ ] SetBlendConstants
+- [x] SetBlendConstants
 - [x] SetStencilReference
 
 ## Composition
-- [ ] Blit (Bug: Example "Blit2DArray" has a sampler issue where the RHS is not downsampled)
+- [ ] Blit 
+    - Mostly functional.
+    - Bug: Example "Blit2DArray.c" has a sampler issue where the RHS is not downsampled.
+    - Bug: Example "TriangleMSAA.c" does not cycle between different sample counts.
+    
