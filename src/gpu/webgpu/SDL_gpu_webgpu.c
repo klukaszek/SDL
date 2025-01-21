@@ -7,23 +7,10 @@
 
 #include "../SDL_sysgpu.h"
 #include "SDL_internal.h"
-#include "stdalign.h"
-#include <SDL3/SDL_events.h>
 #include <SDL3/SDL_gpu.h>
-#include <SDL3/SDL_hints.h>
-#include <SDL3/SDL_mutex.h>
-#include <SDL3/SDL_oldnames.h>
-#include <SDL3/SDL_pixels.h>
-#include <SDL3/SDL_properties.h>
-#include <SDL3/SDL_render.h>
-#include <SDL3/SDL_stdinc.h>
-#include <SDL3/SDL_video.h>
 #include <emscripten/emscripten.h>
 #include <emscripten/html5.h>
 #include <regex.h>
-#include <stdbool.h>
-#include <stdint.h>
-#include <stdio.h>
 #include <webgpu/webgpu.h>
 
 #define MAX_UBO_SECTION_SIZE          4096 // 4   KiB
@@ -33,25 +20,6 @@
 #define MAX_BIND_GROUP_ENTRIES        32
 #define MAX_PIPELINE_BINDINGS         32
 #define MAX_ENTRYPOINT_LENGTH         64
-
-#define EXPAND_ELEMENTS_IF_NEEDED(arr, initialValue, type) \
-    if (arr->count == arr->capacity) {                     \
-        if (arr->capacity == 0) {                          \
-            arr->capacity = initialValue;                  \
-        } else {                                           \
-            arr->capacity *= 2;                            \
-        }                                                  \
-        arr->elements = (type *)SDL_realloc(               \
-            arr->elements,                                 \
-            arr->capacity * sizeof(type));                 \
-    }
-
-#define MOVE_ARRAY_CONTENTS_AND_RESET(i, dstArr, dstCount, srcArr, srcCount) \
-    for (i = 0; i < srcCount; i += 1) {                                      \
-        dstArr[i] = srcArr[i];                                               \
-    }                                                                        \
-    dstCount = srcCount;                                                     \
-    srcCount = 0;
 
 #define TRACK_RESOURCE(resource, type, array, count, capacity) \
     Uint32 i;                                                  \
@@ -86,7 +54,9 @@
         SDL_Log("%s", buffer);                        \
     } while (0)
 
-// Enums
+// Typedefs and Enums
+// ---------------------------------------------------
+
 typedef enum WebGPUBindingType
 {
     WGPUBindingType_Undefined = 0x00000000,
@@ -270,7 +240,7 @@ typedef struct SwapchainSupportDetails
 typedef struct WebGPUSwapchainData
 {
     WGPUSurface surface;
-    WGPUSwapChain swapchain;
+    WGPUSurfaceDescriptor surfaceDesc;
     WGPUTextureFormat format;
     WGPUPresentMode presentMode;
 
@@ -2340,7 +2310,7 @@ bool WebGPU_INTERNAL_CreateSurface(WebGPURenderer *renderer, WindowData *windowD
         surfaceDescriptor.nextInChain = &fromWindowsHWND.chain;
         surfaceDescriptor.label = NULL;
     }
-#elif defined(__EMSCRIPTEN__)
+#elif defined(SDL_PLATFORM_EMSCRIPTEN)
     {
 #ifdef WEBGPU_BACKEND_DAWN
         WGPUSurfaceSourceCanvasHTMLSelector_Emscripten fromCanvasHTMLSelector;
@@ -2360,13 +2330,20 @@ bool WebGPU_INTERNAL_CreateSurface(WebGPURenderer *renderer, WindowData *windowD
 #error "Unsupported WGPU_TARGET"
 #endif
     windowData->swapchainData.surface = wgpuInstanceCreateSurface(renderer->instance, &surfaceDescriptor);
+    windowData->swapchainData.surfaceDesc = surfaceDescriptor;
     return windowData->swapchainData.surface != NULL;
 }
 
 static void WebGPU_CreateSwapchain(WebGPURenderer *renderer, WindowData *windowData)
 {
     SDL_assert(WebGPU_INTERNAL_CreateSurface(renderer, windowData));
+    SDL_assert(windowData->swapchainData.surface);
 
+    WebGPUSwapchainData *swapchainData = &windowData->swapchainData;
+
+    // This is done as a temporary workaround until I can figure out why the macros in WebGPU_INTERNAL_CreateSurface are not working.
+    // Ideally we would just call WebGPU_INTERNAL_CreateSurface here and skip the lines between the dividers.
+    // -----
     WGPUSurfaceDescriptorFromCanvasHTMLSelector canvas_desc = {
         .chain.sType = WGPUSType_SurfaceDescriptorFromCanvasHTMLSelector,
         .selector = "#canvas",
@@ -2375,11 +2352,20 @@ static void WebGPU_CreateSwapchain(WebGPURenderer *renderer, WindowData *windowD
         .nextInChain = &canvas_desc.chain,
         .label = "SDL_GPU Swapchain Surface",
     };
-
-    WebGPUSwapchainData *swapchainData = &windowData->swapchainData;
     swapchainData->surface = wgpuInstanceCreateSurface(renderer->instance, &surf_desc);
+    // -----
+
     swapchainData->format = wgpuSurfaceGetPreferredFormat(swapchainData->surface, renderer->adapter);
     swapchainData->presentMode = SDLToWGPUPresentMode(windowData->presentMode);
+    wgpuSurfaceConfigure(swapchainData->surface,  &(WGPUSurfaceConfiguration){
+        .usage = WGPUTextureUsage_RenderAttachment | WGPUTextureUsage_CopySrc | WGPUTextureUsage_CopyDst,
+        .format = swapchainData->format,
+        .width = windowData->window->w,
+        .height = windowData->window->h,
+        .presentMode = swapchainData->presentMode,
+        .alphaMode = WGPUCompositeAlphaMode_Opaque,
+        .device = renderer->device,
+    });
 
     // Swapchain should be the size of whatever SDL_Window it is attached to
     swapchainData->width = windowData->window->w;
@@ -2389,17 +2375,6 @@ static void WebGPU_CreateSwapchain(WebGPURenderer *renderer, WindowData *windowD
     swapchainData->msaaTexture = NULL;
     swapchainData->depthStencilView = NULL;
     swapchainData->depthStencilTexture = NULL;
-
-    // Emscripten WebGPU swapchain
-    WGPUSwapChainDescriptor swapchainDesc = {
-        .usage = WGPUTextureUsage_RenderAttachment | WGPUTextureUsage_CopySrc | WGPUTextureUsage_CopyDst,
-        .format = swapchainData->format,
-        .width = swapchainData->width,
-        .height = swapchainData->height,
-        .presentMode = swapchainData->presentMode,
-    };
-
-    swapchainData->swapchain = wgpuDeviceCreateSwapChain(renderer->device, swapchainData->surface, &swapchainDesc);
 
     // Depth/stencil texture for swapchain
     WGPUTextureDescriptor depthDesc = {
@@ -2444,7 +2419,7 @@ static void WebGPU_CreateSwapchain(WebGPURenderer *renderer, WindowData *windowD
         swapchainData->msaaView = wgpuTextureCreateView(swapchainData->msaaTexture, NULL);
     }
 
-    SDL_Log("WebGPU: Created swapchain %p of size %dx%d", swapchainData->swapchain, swapchainData->width, swapchainData->height);
+    SDL_Log("WebGPU: Created swapchain surface %p of size %dx%d", swapchainData->surface, swapchainData->width, swapchainData->height);
 }
 
 static SDL_GPUTextureFormat WebGPU_GetSwapchainTextureFormat(
@@ -2475,10 +2450,6 @@ static void WebGPU_DestroySwapchain(WebGPUSwapchainData *swapchainData)
         wgpuTextureRelease(swapchainData->depthStencilTexture);
         swapchainData->depthStencilTexture = NULL;
     }
-    if (swapchainData->swapchain) {
-        wgpuSwapChainRelease(swapchainData->swapchain);
-        swapchainData->swapchain = NULL;
-    }
     if (swapchainData->surface) {
         wgpuSurfaceRelease(swapchainData->surface);
         swapchainData->surface = NULL;
@@ -2490,6 +2461,32 @@ static void WebGPU_RecreateSwapchain(WebGPURenderer *renderer, WindowData *windo
     WebGPU_DestroySwapchain(&windowData->swapchainData);
     WebGPU_CreateSwapchain(renderer, windowData);
     windowData->needsSwapchainRecreate = false;
+}
+
+static WGPUTexture WebGPU_INTERNAL_AcquireSurfaceTexture(WebGPURenderer *renderer, WindowData *windowData)
+{
+    WGPUSurfaceTexture surfaceTexture;
+    wgpuSurfaceGetCurrentTexture(windowData->swapchainData.surface, &surfaceTexture);
+
+    switch (surfaceTexture.status) {
+        case WGPUSurfaceGetCurrentTextureStatus_Success:
+            break;
+        case WGPUSurfaceGetCurrentTextureStatus_DeviceLost:
+            SDL_LogError(SDL_LOG_CATEGORY_GPU, "GPU DEVICE LOST");
+            SDL_SetError("GPU DEVICE LOST");
+            return NULL;
+        case WGPUSurfaceGetCurrentTextureStatus_OutOfMemory:
+            SDL_OutOfMemory();
+            return NULL;
+        case WGPUSurfaceGetCurrentTextureStatus_Timeout:
+        case WGPUSurfaceGetCurrentTextureStatus_Outdated:
+        case WGPUSurfaceGetCurrentTextureStatus_Lost:
+        default:
+            WebGPU_RecreateSwapchain(renderer, windowData);
+            return NULL;
+    }
+
+    return surfaceTexture.texture;
 }
 
 static bool WebGPU_AcquireSwapchainTexture(
@@ -2516,11 +2513,11 @@ static bool WebGPU_AcquireSwapchainTexture(
         }
     }
 
-    // Get the current texture view from the swapchain
-    WGPUTextureView currentView = wgpuSwapChainGetCurrentTextureView(swapchainData->swapchain);
-    if (currentView == NULL) {
-        SDL_LogError(SDL_LOG_CATEGORY_GPU, "Failed to acquire texture view from swapchain");
-        SDL_SetError("Failed to acquire texture view from swapchain");
+    // Get the current texture from the swapchain
+    WGPUTexture currentTexture = WebGPU_INTERNAL_AcquireSurfaceTexture(renderer, windowData);
+    if (currentTexture == NULL) {
+        SDL_LogError(SDL_LOG_CATEGORY_GPU, "Failed to acquire texture from swapchain");
+        SDL_SetError("Failed to acquire texture from swapchain");
         return false;
     }
 
@@ -2531,8 +2528,8 @@ static bool WebGPU_AcquireSwapchainTexture(
         return false;
     }
 
-    texture->texture = wgpuSwapChainGetCurrentTexture(swapchainData->swapchain);
-    texture->fullView = currentView;
+    texture->texture = currentTexture;
+    texture->fullView = wgpuTextureCreateView(currentTexture, NULL);
     texture->dimensions = (WGPUExtent3D){
         .width = swapchainData->width,
         .height = swapchainData->height,
