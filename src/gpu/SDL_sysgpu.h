@@ -18,9 +18,8 @@
      misrepresented as being the original software.
   3. This notice may not be removed or altered from any source distribution.
 */
-#include "../SDL_internal.h"
-#include "../video/SDL_sysvideo.h"
 #include "SDL_internal.h"
+#include "../video/SDL_sysvideo.h"
 
 #ifndef SDL_GPU_DRIVER_H
 #define SDL_GPU_DRIVER_H

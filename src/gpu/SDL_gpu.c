@@ -20,7 +20,6 @@
 */
 #include "SDL_internal.h"
 #include "SDL_sysgpu.h"
-#include <SDL3/SDL_gpu.h>
 
 // FIXME: This could probably use SDL_ObjectValid
 #define CHECK_DEVICE_MAGIC(device, retval)  \
