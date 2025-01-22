@@ -1966,11 +1966,6 @@ static SDL_GPUCommandBuffer *WebGPU_AcquireCommandBuffer(SDL_GPURenderer *driver
     commandBuffer->renderer = renderer;
     commandBuffer->common.device = renderer->sdlDevice;
 
-    int width, height;
-    SDL_GetWindowSize(renderer->claimedWindows[0]->window, &width, &height);
-    commandBuffer->currentViewport = (WebGPUViewport){ 0, 0, width, height, 0.0, 1.0 };
-    commandBuffer->currentScissor = (WebGPURect){ 0, 0, width, height };
-
     SDL_zero(commandBuffer->layerViews);
     commandBuffer->layerViewCount = 0;
 
@@ -2089,6 +2084,11 @@ void WebGPU_BeginRenderPass(SDL_GPUCommandBuffer *commandBuffer,
     if (!wgpu_cmd_buf || colorAttachmentCount == 0) {
         return;
     }
+
+    int width, height;
+    SDL_GetWindowSize(wgpu_cmd_buf->renderer->claimedWindows[0]->window, &width, &height);
+    wgpu_cmd_buf->currentViewport = (WebGPUViewport){ 0, 0, width, height, 0.0, 1.0 };
+    wgpu_cmd_buf->currentScissor = (WebGPURect){ 0, 0, width, height };
 
     // Handle color attachments
     WGPURenderPassColorAttachment colorAttachments[colorAttachmentCount];
