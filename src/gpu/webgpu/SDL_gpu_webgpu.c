@@ -26,12 +26,16 @@
 // Description: WebGPU driver for SDL_gpu using the emscripten WebGPU implementation
 // Note: Compiling SDL GPU programs using emscripten will require -sUSE_WEBGPU=1 -sASYNCIFY=1
 
-
 #include "SDL_internal.h"
 #include "../SDL_sysgpu.h"
 #include <emscripten/emscripten.h>
 #include <emscripten/html5.h>
 #include <regex.h>
+
+// TODO: REMOVE
+// Code compiles without these but my IDE is complaining without them
+#include "../../../include/SDL3/SDL_gpu.h"
+#include "../../../include/SDL3/SDL_atomic.h"
 
 // I currently have a copy of the webgpu.h file in the include directory:
 // - usr/local/include/webgpu/webgpu.h
