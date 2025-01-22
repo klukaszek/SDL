@@ -26,12 +26,18 @@
 // Description: WebGPU driver for SDL_gpu using the emscripten WebGPU implementation
 // Note: Compiling SDL GPU programs using emscripten will require -sUSE_WEBGPU=1 -sASYNCIFY=1
 
-#include "../SDL_sysgpu.h"
+
 #include "SDL_internal.h"
-#include <SDL3/SDL_gpu.h>
+#include "../SDL_sysgpu.h"
 #include <emscripten/emscripten.h>
 #include <emscripten/html5.h>
 #include <regex.h>
+
+// I currently have a copy of the webgpu.h file in the include directory:
+// - usr/local/include/webgpu/webgpu.h
+// it can be downloaded from here: https://github.com/webgpu-native/webgpu-headers/blob/main/webgpu.h
+//
+// THIS IS A TEMPORARY SOLUTION
 #include <webgpu/webgpu.h>
 
 #define MAX_UBO_SECTION_SIZE          4096 // 4   KiB
