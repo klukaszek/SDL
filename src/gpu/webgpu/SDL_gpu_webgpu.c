@@ -19,6 +19,8 @@
   3. This notice may not be removed or altered from any source distribution.
 */
 
+#include "SDL_internal.h"
+
 // File: /webgpu/SDL_gpu_webgpu.c
 // Author: Kyle Lukaszek
 // Email: kylelukaszek [at] gmail [dot] com
@@ -27,7 +29,6 @@
 // Note: Compiling SDL GPU programs using emscripten will require -sUSE_WEBGPU=1 -sASYNCIFY=1
 
 #include "../SDL_sysgpu.h"
-#include "SDL_internal.h"
 #include <emscripten/emscripten.h>
 #include <emscripten/html5.h>
 #include <regex.h>
