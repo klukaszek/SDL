@@ -362,6 +362,7 @@ typedef struct WebGPURenderer
     WGPUInstance instance;
     WGPUAdapter adapter;
     WGPUDevice device;
+    bool deviceError;
     WGPUQueue queue;
 
     WindowData **claimedWindows;
@@ -1150,9 +1151,11 @@ static void WebGPU_RequestDeviceCallback(WGPURequestDeviceStatus status, WGPUDev
     WebGPURenderer *renderer = (WebGPURenderer *)userdata;
     if (status == WGPURequestDeviceStatus_Success) {
         renderer->device = device;
+        renderer->deviceError = false;
         SDL_Log("WebGPU device requested successfully");
     } else {
         SDL_LogError(SDL_LOG_CATEGORY_GPU, "Failed to request WebGPU device: %s", message);
+        renderer->deviceError = true;
     }
 }
 
@@ -1414,6 +1417,8 @@ static void *WebGPU_MapTransferBuffer(
                 return NULL;
             }
 
+            // Must be called to yield control to the browser so that it can tick the device for us.
+            // Without this, the mapping operation will never complete.
             SDL_Delay(1);
         }
 
@@ -4458,6 +4463,7 @@ static SDL_GPUDevice *WebGPU_CreateDevice(bool debug, bool preferLowPower, SDL_P
     SDL_zero(*renderer);
     renderer->debug = debug;
     renderer->preferLowPower = preferLowPower;
+    renderer->deviceError = false;
 
     // Initialize WebGPU instance so that we can request an adapter and then device
     renderer->instance = wgpuCreateInstance(NULL);
@@ -4480,7 +4486,10 @@ static SDL_GPUDevice *WebGPU_CreateDevice(bool debug, bool preferLowPower, SDL_P
     // This seems to be necessary to ensure that the device is created before continuing
     // This should probably be tested on all browsers to ensure that it works as expected
     // but Chrome's Dawn WebGPU implementation needs this to work
-    while (!renderer->device) {
+    // See: https://eliemichel.github.io/LearnWebGPU/basic-3d-rendering/input-geometry/playing-with-buffers.html
+    //
+    // This will not loop infinitely as the callback will set the device or deviceError
+    while (!renderer->device && !renderer->deviceError) {
         SDL_Delay(1);
     }
 
