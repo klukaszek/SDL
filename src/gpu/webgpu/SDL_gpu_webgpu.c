@@ -33,15 +33,15 @@
 #include <regex.h>
 
 // TODO: REMOVE
-// Code compiles without these but my IDE is complaining without them
-#include "../../../include/SDL3/SDL_atomic.h"
-#include "../../../include/SDL3/SDL_gpu.h"
+// Code compiles without these but my LSP freaks out without them
+#include <SDL3/SDL_gpu.h>
+#include <SDL3/SDL_atomic.h>
 
-// I currently have a copy of the webgpu.h file in the include directory:
+// I currently have a copy of the webgpu.h file in the local include directory:
 // - usr/local/include/webgpu/webgpu.h
 // it can be downloaded from here: https://github.com/webgpu-native/webgpu-headers/blob/main/webgpu.h
 //
-// THIS IS A TEMPORARY SOLUTION
+// The code compiles without it as long as Emscripten is used and the -sUSE_WEBGPU flag is set
 #include <webgpu/webgpu.h>
 
 #define MAX_UBO_SECTION_SIZE          4096 // 4   KiB
@@ -2202,6 +2202,7 @@ void WebGPU_BeginRenderPass(SDL_GPUCommandBuffer *commandBuffer,
 
     WebGPUCommandBuffer *wgpu_cmd_buf = (WebGPUCommandBuffer *)commandBuffer;
     if (!wgpu_cmd_buf || colorAttachmentCount == 0) {
+        SDL_LogError(SDL_LOG_CATEGORY_GPU, "Invalid parameters for render pass");
         return;
     }
 
@@ -2286,6 +2287,7 @@ void WebGPU_BeginRenderPass(SDL_GPUCommandBuffer *commandBuffer,
         .depthStencilAttachment = depthStencilAttachmentInfo ? &depthStencilAttachment : NULL
     };
 
+    // Create the render pass encoder
     wgpu_cmd_buf->renderPassEncoder =
         wgpuCommandEncoderBeginRenderPass(wgpu_cmd_buf->commandEncoder, &renderPassDesc);
 
