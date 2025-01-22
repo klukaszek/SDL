@@ -26,16 +26,16 @@
 // Description: WebGPU driver for SDL_gpu using the emscripten WebGPU implementation
 // Note: Compiling SDL GPU programs using emscripten will require -sUSE_WEBGPU=1 -sASYNCIFY=1
 
-#include "SDL_internal.h"
 #include "../SDL_sysgpu.h"
+#include "SDL_internal.h"
 #include <emscripten/emscripten.h>
 #include <emscripten/html5.h>
 #include <regex.h>
 
 // TODO: REMOVE
 // Code compiles without these but my IDE is complaining without them
-#include "../../../include/SDL3/SDL_gpu.h"
 #include "../../../include/SDL3/SDL_atomic.h"
+#include "../../../include/SDL3/SDL_gpu.h"
 
 // I currently have a copy of the webgpu.h file in the include directory:
 // - usr/local/include/webgpu/webgpu.h
@@ -2082,6 +2082,88 @@ static void WebGPU_ReleaseFence(SDL_GPURenderer *driverData, SDL_GPUFence *fence
     // There are no fences in WebGPU, so we don't need to do anything here
 }
 
+void WebGPU_SetViewport(SDL_GPUCommandBuffer *renderPass, const SDL_GPUViewport *viewport)
+{
+    if (renderPass == NULL) {
+        return;
+    }
+
+    WebGPUCommandBuffer *commandBuffer = (WebGPUCommandBuffer *)renderPass;
+
+    Uint32 window_width = commandBuffer->renderer->claimedWindows[0]->swapchainData.width;
+    Uint32 window_height = commandBuffer->renderer->claimedWindows[0]->swapchainData.height;
+    WebGPUViewport *wgpuViewport = &commandBuffer->currentViewport;
+
+    float max_viewport_width = (float)window_width - viewport->x;
+    float max_viewport_height = (float)window_height - viewport->y;
+
+    wgpuViewport = &(WebGPUViewport){
+        .x = viewport->x,
+        .y = viewport->y,
+        .width = viewport->w > max_viewport_width ? max_viewport_width : viewport->w,
+        .height = viewport->h > max_viewport_height ? max_viewport_height : viewport->h,
+        .minDepth = viewport->min_depth > 0.0f ? viewport->min_depth : 0.0f,
+        .maxDepth = viewport->max_depth > wgpuViewport->minDepth ? viewport->max_depth : wgpuViewport->minDepth,
+    };
+
+    // Set the viewport
+    wgpuRenderPassEncoderSetViewport(commandBuffer->renderPassEncoder, wgpuViewport->x, wgpuViewport->y, wgpuViewport->width, wgpuViewport->height, wgpuViewport->minDepth, wgpuViewport->maxDepth);
+}
+
+void WebGPU_SetScissorRect(SDL_GPUCommandBuffer *renderPass, const SDL_Rect *scissorRect)
+{
+    if (renderPass == NULL) {
+        return;
+    }
+
+    WebGPUCommandBuffer *commandBuffer = (WebGPUCommandBuffer *)renderPass;
+
+    Uint32 window_width = commandBuffer->renderer->claimedWindows[0]->swapchainData.width;
+    Uint32 window_height = commandBuffer->renderer->claimedWindows[0]->swapchainData.height;
+
+    Uint32 max_scissor_width = window_width - scissorRect->x;
+    Uint32 max_scissor_height = window_height - scissorRect->y;
+
+    Uint32 clamped_width = (scissorRect->w > max_scissor_width) ? max_scissor_width : scissorRect->w;
+    Uint32 clamped_height = (scissorRect->h > max_scissor_height) ? max_scissor_height : scissorRect->h;
+
+    commandBuffer->currentScissor = (WebGPURect){
+        .x = scissorRect->x,
+        .y = scissorRect->y,
+        .width = clamped_width,
+        .height = clamped_height,
+    };
+
+    wgpuRenderPassEncoderSetScissorRect(commandBuffer->renderPassEncoder, scissorRect->x, scissorRect->y, clamped_width, clamped_height);
+}
+
+static void WebGPU_SetStencilReference(SDL_GPUCommandBuffer *commandBuffer,
+                                       Uint8 reference)
+{
+    if (commandBuffer == NULL) {
+        return;
+    }
+
+    wgpuRenderPassEncoderSetStencilReference(((WebGPUCommandBuffer *)commandBuffer)->renderPassEncoder, reference);
+}
+
+static void WebGPU_SetBlendConstants(
+    SDL_GPUCommandBuffer *commandBuffer,
+    SDL_FColor blendConstants)
+{
+    if (commandBuffer == NULL) {
+        return;
+    }
+
+    wgpuRenderPassEncoderSetBlendConstant(((WebGPUCommandBuffer *)commandBuffer)->renderPassEncoder,
+                                          &(WGPUColor){
+                                              .r = blendConstants.r,
+                                              .g = blendConstants.g,
+                                              .b = blendConstants.b,
+                                              .a = blendConstants.a,
+                                          });
+}
+
 static WGPUTextureView WebGPU_INTERNAL_CreateLayerView(WGPUTexture texture,
                                                        WGPUTextureFormat format,
                                                        SDL_GPUTextureType type,
@@ -2111,23 +2193,40 @@ void WebGPU_BeginRenderPass(SDL_GPUCommandBuffer *commandBuffer,
                             uint32_t colorAttachmentCount,
                             const SDL_GPUDepthStencilTargetInfo *depthStencilAttachmentInfo)
 {
+    Uint32 w, h;
+    SDL_GPUViewport defaultViewport;
+    SDL_Rect defaultScissor;
+    SDL_FColor defaultBlendConstants;
+    Uint32 framebufferWidth = SDL_MAX_UINT32;
+    Uint32 framebufferHeight = SDL_MAX_UINT32;
+
     WebGPUCommandBuffer *wgpu_cmd_buf = (WebGPUCommandBuffer *)commandBuffer;
     if (!wgpu_cmd_buf || colorAttachmentCount == 0) {
         return;
     }
 
-    int width, height;
-    SDL_GetWindowSize(wgpu_cmd_buf->renderer->claimedWindows[0]->window, &width, &height);
-    wgpu_cmd_buf->currentViewport = (WebGPUViewport){ 0, 0, width, height, 0.0, 1.0 };
-    wgpu_cmd_buf->currentScissor = (WebGPURect){ 0, 0, width, height };
-
     // Handle color attachments
     WGPURenderPassColorAttachment colorAttachments[colorAttachmentCount];
     for (uint32_t i = 0; i < colorAttachmentCount; i++) {
+
         const SDL_GPUColorTargetInfo *colorInfo = &colorAttachmentInfos[i];
         WebGPUTexture *texture = (WebGPUTexture *)colorInfo->texture;
         WGPUTextureView textureView = texture->fullView;
 
+        w = texture->common.info.width >> colorInfo->mip_level;
+        h = texture->common.info.height >> colorInfo->mip_level;
+
+        // The framebuffer cannot be larger than the smallest attachment.
+
+        if (w < framebufferWidth) {
+            framebufferWidth = w;
+        }
+
+        if (h < framebufferHeight) {
+            framebufferHeight = h;
+        }
+
+        // If a layer is specified, create a layer view from the texture
         if (colorInfo->layer_or_depth_plane != ~0u && texture->layerCount > 1) {
             textureView = WebGPU_INTERNAL_CreateLayerView(texture->texture,
                                                           SDLToWGPUTextureFormat(texture->format),
@@ -2167,6 +2266,17 @@ void WebGPU_BeginRenderPass(SDL_GPUCommandBuffer *commandBuffer,
             .stencilStoreOp = SDLToWGPUStoreOp(depthStencilAttachmentInfo->stencil_store_op),
             .stencilClearValue = depthStencilAttachmentInfo->clear_stencil
         };
+
+        WebGPUTexture *tex = (WebGPUTexture *)depthStencilAttachmentInfo->texture;
+        w = tex->common.info.width;
+        h = tex->common.info.height;
+
+        if (w < framebufferWidth) {
+            framebufferWidth = w;
+        }
+        if (h < framebufferHeight) {
+            framebufferHeight = h;
+        }
     }
 
     WGPURenderPassDescriptor renderPassDesc = {
@@ -2178,6 +2288,30 @@ void WebGPU_BeginRenderPass(SDL_GPUCommandBuffer *commandBuffer,
 
     wgpu_cmd_buf->renderPassEncoder =
         wgpuCommandEncoderBeginRenderPass(wgpu_cmd_buf->commandEncoder, &renderPassDesc);
+
+    // Set sensible deafult states for the viewport, scissor, and blend constants
+    defaultViewport.x = 0;
+    defaultViewport.y = 0;
+    defaultViewport.w = (float)framebufferWidth;
+    defaultViewport.h = (float)framebufferHeight;
+    defaultViewport.min_depth = 0;
+    defaultViewport.max_depth = 1;
+    wgpu_cmd_buf->currentViewport = (WebGPUViewport){ defaultViewport.x, defaultViewport.y, defaultViewport.w, defaultViewport.h, defaultViewport.min_depth, defaultViewport.max_depth };
+
+    WebGPU_SetViewport(commandBuffer, &defaultViewport);
+
+    defaultScissor.x = 0;
+    defaultScissor.y = 0;
+    defaultScissor.w = (Sint32)framebufferWidth;
+    defaultScissor.h = (Sint32)framebufferHeight;
+    wgpu_cmd_buf->currentScissor = (WebGPURect){ defaultScissor.x, defaultScissor.y, defaultScissor.w, defaultScissor.h };
+
+    WebGPU_SetScissorRect(commandBuffer, &defaultScissor);
+
+    defaultBlendConstants = (SDL_FColor){ 0.0f, 0.0f, 0.0f, 0.0f };
+    WebGPU_SetBlendConstants(commandBuffer, defaultBlendConstants);
+
+    WebGPU_SetStencilReference(commandBuffer, 0);
 
     wgpu_cmd_buf->common.render_pass = (Pass){
         .command_buffer = commandBuffer,
@@ -3811,87 +3945,6 @@ static void WebGPU_BindFragmentSamplers(SDL_GPUCommandBuffer *commandBuffer,
     WebGPU_INTERNAL_BindSamplers(commandBuffer, firstSlot, textureSamplerBindings, numBindings);
 }
 
-void WebGPU_SetViewport(SDL_GPUCommandBuffer *renderPass, const SDL_GPUViewport *viewport)
-{
-    if (renderPass == NULL) {
-        return;
-    }
-
-    WebGPUCommandBuffer *commandBuffer = (WebGPUCommandBuffer *)renderPass;
-
-    Uint32 window_width = commandBuffer->renderer->claimedWindows[0]->swapchainData.width;
-    Uint32 window_height = commandBuffer->renderer->claimedWindows[0]->swapchainData.height;
-    WebGPUViewport *wgpuViewport = &commandBuffer->currentViewport;
-
-    float max_viewport_width = (float)window_width - viewport->x;
-    float max_viewport_height = (float)window_height - viewport->y;
-
-    wgpuViewport = &(WebGPUViewport){
-        .x = viewport->x,
-        .y = viewport->y,
-        .width = viewport->w > max_viewport_width ? max_viewport_width : viewport->w,
-        .height = viewport->h > max_viewport_height ? max_viewport_height : viewport->h,
-        .minDepth = viewport->min_depth > 0.0f ? viewport->min_depth : 0.0f,
-        .maxDepth = viewport->max_depth > wgpuViewport->minDepth ? viewport->max_depth : wgpuViewport->minDepth,
-    };
-
-    // Set the viewport
-    wgpuRenderPassEncoderSetViewport(commandBuffer->renderPassEncoder, wgpuViewport->x, wgpuViewport->y, wgpuViewport->width, wgpuViewport->height, wgpuViewport->minDepth, wgpuViewport->maxDepth);
-}
-
-void WebGPU_SetScissorRect(SDL_GPUCommandBuffer *renderPass, const SDL_Rect *scissorRect)
-{
-    if (renderPass == NULL) {
-        return;
-    }
-
-    WebGPUCommandBuffer *commandBuffer = (WebGPUCommandBuffer *)renderPass;
-
-    Uint32 window_width = commandBuffer->renderer->claimedWindows[0]->swapchainData.width;
-    Uint32 window_height = commandBuffer->renderer->claimedWindows[0]->swapchainData.height;
-
-    Uint32 max_scissor_width = window_width - scissorRect->x;
-    Uint32 max_scissor_height = window_height - scissorRect->y;
-
-    Uint32 clamped_width = (scissorRect->w > max_scissor_width) ? max_scissor_width : scissorRect->w;
-    Uint32 clamped_height = (scissorRect->h > max_scissor_height) ? max_scissor_height : scissorRect->h;
-
-    commandBuffer->currentScissor = (WebGPURect){
-        .x = scissorRect->x,
-        .y = scissorRect->y,
-        .width = clamped_width,
-        .height = clamped_height,
-    };
-
-    wgpuRenderPassEncoderSetScissorRect(commandBuffer->renderPassEncoder, scissorRect->x, scissorRect->y, clamped_width, clamped_height);
-}
-
-static void WebGPU_SetStencilReference(SDL_GPUCommandBuffer *commandBuffer,
-                                       Uint8 reference)
-{
-    if (commandBuffer == NULL) {
-        return;
-    }
-
-    wgpuRenderPassEncoderSetStencilReference(((WebGPUCommandBuffer *)commandBuffer)->renderPassEncoder, reference);
-}
-
-static void WebGPU_SetBlendConstants(
-    SDL_GPUCommandBuffer *commandBuffer,
-    SDL_FColor blendConstants)
-{
-    if (commandBuffer == NULL) {
-        return;
-    }
-
-    wgpuRenderPassEncoderSetBlendConstant(((WebGPUCommandBuffer *)commandBuffer)->renderPassEncoder, &(WGPUColor){
-                                                                                                         .r = blendConstants.r,
-                                                                                                         .g = blendConstants.g,
-                                                                                                         .b = blendConstants.b,
-                                                                                                         .a = blendConstants.a,
-                                                                                                     });
-}
-
 static void WebGPU_BindGraphicsPipeline(
     SDL_GPUCommandBuffer *commandBuffer,
     SDL_GPUGraphicsPipeline *graphicsPipeline)
@@ -4010,7 +4063,6 @@ static void WebGPU_DrawPrimitives(
     WebGPU_INTERNAL_SetBindGroups(commandBuffer);
     wgpuRenderPassEncoderDraw(wgpu_cmd_buf->renderPassEncoder, vertexCount, instanceCount, firstVertex, firstInstance);
 }
-
 
 static void WebGPU_DrawIndexedPrimitives(
     SDL_GPUCommandBuffer *commandBuffer,
