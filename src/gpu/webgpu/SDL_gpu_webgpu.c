@@ -434,6 +434,15 @@ typedef struct WebGPURenderer
     SDL_GPUSampler *blitNearestSampler;
     SDL_GPUSampler *blitLinearSampler;
 
+    // Thread safety
+    SDL_Mutex *allocatorLock;
+    SDL_Mutex *disposeLock;
+    SDL_Mutex *submitLock;
+    SDL_Mutex *acquireCommandBufferLock;
+    SDL_Mutex *acquireUniformBufferLock;
+    SDL_Mutex *framebufferFetchLock;
+    SDL_Mutex *windowLock;
+
     BlitPipelineCacheEntry *blitPipelines;
     Uint32 blitPipelineCount;
     Uint32 blitPipelineCapacity;
@@ -2012,6 +2021,45 @@ static void WebGPU_BindIndexBuffer(SDL_GPUCommandBuffer *commandBuffer,
         buffer->size == 0 ? WGPU_WHOLE_SIZE : buffer->size);
 }
 
+static WebGPUFence *WebGPU_INTERNAL_AcquireFenceFromPool(WebGPURenderer *renderer)
+{
+    WebGPUFence *handle;
+
+    if (renderer->fencePool.availableFenceCount == 0) {
+        handle = SDL_malloc(sizeof(WebGPUFence));
+        SDL_SetAtomicInt(&handle->referenceCount, 0);
+        return handle;
+    }
+
+    SDL_LockMutex(renderer->fencePool.lock);
+
+    handle = renderer->fencePool.availableFences[renderer->fencePool.availableFenceCount - 1];
+    renderer->fencePool.availableFenceCount -= 1;
+
+    SDL_UnlockMutex(renderer->fencePool.lock);
+
+    return handle;
+}
+
+static void WebGPU_INTERNAL_ReturnFenceToPool(
+    WebGPURenderer *renderer,
+    WebGPUFence *fenceHandle)
+{
+    SDL_LockMutex(renderer->fencePool.lock);
+
+    EXPAND_ARRAY_IF_NEEDED(
+        renderer->fencePool.availableFences,
+        WebGPUFence *,
+        renderer->fencePool.availableFenceCount + 1,
+        renderer->fencePool.availableFenceCapacity,
+        renderer->fencePool.availableFenceCapacity * 2);
+
+    renderer->fencePool.availableFences[renderer->fencePool.availableFenceCount] = fenceHandle;
+    renderer->fencePool.availableFenceCount += 1;
+
+    SDL_UnlockMutex(renderer->fencePool.lock);
+}
+
 static SDL_GPUCommandBuffer *WebGPU_AcquireCommandBuffer(SDL_GPURenderer *driverData)
 {
     WebGPURenderer *renderer = (WebGPURenderer *)driverData;
@@ -2049,6 +2097,16 @@ static bool WebGPU_Submit(SDL_GPUCommandBuffer *commandBuffer)
         return false;
     }
     wgpuQueueSubmit(renderer->queue, 1, &commandHandle);
+
+    wgpu_cmd_buf->inFlightFence = WebGPU_INTERNAL_AcquireFenceFromPool(renderer);
+    if (wgpu_cmd_buf->inFlightFence == NULL) {
+        SDL_UnlockMutex(renderer->submitLock);
+        return false;
+    }
+
+    // Command buffer has a reference to the in-flight fence
+    (void)SDL_AtomicIncRef(&wgpu_cmd_buf->inFlightFence->referenceCount);
+
 
     // Release the actual command buffer and command encoder
     wgpuCommandBufferRelease(commandHandle);
@@ -2106,7 +2164,10 @@ static bool WebGPU_QueryFence(SDL_GPURenderer *driverData, SDL_GPUFence *fence)
 
 static void WebGPU_ReleaseFence(SDL_GPURenderer *driverData, SDL_GPUFence *fence)
 {
-    // There are no fences in WebGPU, so we don't need to do anything here
+    WebGPUFence *handle = (WebGPUFence *)fence;
+    if (SDL_AtomicDecRef(&handle->referenceCount)) {
+        WebGPU_INTERNAL_ReturnFenceToPool((WebGPURenderer *)driverData, handle);
+    }
 }
 
 void WebGPU_SetViewport(SDL_GPUCommandBuffer *renderPass, const SDL_GPUViewport *viewport)
@@ -4562,6 +4623,15 @@ static void WebGPU_DestroyDevice(SDL_GPUDevice *device)
         SDL_free(renderer->fencePool.availableFences[i]);
     }
 
+    // Destroy all renderer associated locks
+    SDL_DestroyMutex(renderer->allocatorLock);
+    SDL_DestroyMutex(renderer->disposeLock);
+    SDL_DestroyMutex(renderer->submitLock);
+    SDL_DestroyMutex(renderer->acquireCommandBufferLock);
+    SDL_DestroyMutex(renderer->acquireUniformBufferLock);
+    SDL_DestroyMutex(renderer->framebufferFetchLock);
+    SDL_DestroyMutex(renderer->windowLock);
+
     /*// Destroy the device*/
     wgpuDeviceDestroy(renderer->device);
     wgpuInstanceRelease(renderer->instance);
@@ -4619,6 +4689,15 @@ static SDL_GPUDevice *WebGPU_CreateDevice(bool debug, bool preferLowPower, SDL_P
 
     // Initialize all of the nessary resources for enabling blitting
     WebGPU_INTERNAL_InitBlitResources(renderer);
+
+    // Threading
+    renderer->allocatorLock = SDL_CreateMutex();
+    renderer->disposeLock = SDL_CreateMutex();
+    renderer->submitLock = SDL_CreateMutex();
+    renderer->acquireCommandBufferLock = SDL_CreateMutex();
+    renderer->acquireUniformBufferLock = SDL_CreateMutex();
+    renderer->framebufferFetchLock = SDL_CreateMutex();
+    renderer->windowLock = SDL_CreateMutex();
 
     // Initialize our fence pool
     renderer->fencePool.lock = SDL_CreateMutex();
