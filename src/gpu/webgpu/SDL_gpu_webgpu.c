@@ -2095,6 +2095,16 @@ static void WebGPU_INTERNAL_ReturnFenceToPool(
     SDL_UnlockMutex(renderer->fencePool.lock);
 }
 
+static void WebGPU_INTERNAL_FenceCallback(WGPUQueueWorkDoneStatus status, void *userdata)
+{
+    WebGPUFence *fence = (WebGPUFence *)userdata;
+    if (status == WGPUQueueWorkDoneStatus_Success) {
+        SDL_SetAtomicInt(&fence->fence, 1);
+    } else {
+        SDL_LogError(SDL_LOG_CATEGORY_GPU, "Failed to wait for fence");
+    }
+}
+
 static bool WebGPU_QueryFence(SDL_GPURenderer *driverData, SDL_GPUFence *fence)
 {
     WebGPUFence *handle = (WebGPUFence *)fence;
@@ -2140,13 +2150,15 @@ static bool WebGPU_Submit(SDL_GPUCommandBuffer *commandBuffer)
     };
 
     // Finish the command buffer and submit it to the queue
-    WGPUCommandBuffer commandHandle = wgpuCommandEncoderFinish(wgpu_cmd_buf->commandEncoder, &commandBufferDesc);
+    WGPUCommandBuffer commandHandle = wgpuCommandEncoderFinish(
+        wgpu_cmd_buf->commandEncoder,
+        &commandBufferDesc);
+
     if (!commandHandle) {
         SDL_LogError(SDL_LOG_CATEGORY_GPU, "Failed to finish command buffer");
         SDL_UnlockMutex(renderer->submitLock);
         return false;
     }
-    wgpuQueueSubmit(renderer->queue, 1, &commandHandle);
 
     // Create a fence for the command buffer
     wgpu_cmd_buf->inFlightFence = WebGPU_INTERNAL_AcquireFenceFromPool(renderer);
@@ -2158,6 +2170,9 @@ static bool WebGPU_Submit(SDL_GPUCommandBuffer *commandBuffer)
 
     // Command buffer has a reference to the in-flight fence
     (void)SDL_AtomicIncRef(&wgpu_cmd_buf->inFlightFence->referenceCount);
+
+    // Submit the command buffer to the queue
+    wgpuQueueSubmit(renderer->queue, 1, &commandHandle);
 
     // Release the actual command buffer and command encoder
     wgpuCommandBufferRelease(commandHandle);
@@ -2181,10 +2196,10 @@ static SDL_GPUFence *WebGPU_SubmitAndAcquireFence(SDL_GPUCommandBuffer *commandB
 {
     WebGPUCommandBuffer *wgpu_cmd_buf = (WebGPUCommandBuffer *)commandBuffer;
     wgpu_cmd_buf->autoReleaseFence = false;
-
     if (!WebGPU_Submit(commandBuffer)) {
         return NULL;
     }
+    wgpuQueueOnSubmittedWorkDone(wgpu_cmd_buf->renderer->queue, WebGPU_INTERNAL_FenceCallback, wgpu_cmd_buf->inFlightFence);
     return (SDL_GPUFence *)(wgpu_cmd_buf->inFlightFence);
 }
 
@@ -2208,6 +2223,9 @@ static bool WebGPU_Wait(SDL_GPURenderer *driverData)
 
     SDL_UnlockMutex(renderer->submitLock);
 
+    // TODO: Implement this once pools are all implemented
+    /*WebGPU_INTERNAL_PerformPendingDestroys(renderer);*/
+
     return true;
 }
 
@@ -2217,6 +2235,8 @@ static bool WebGPU_WaitForFences(
     SDL_GPUFence *const *fences,
     Uint32 numFences)
 {
+    WebGPURenderer *renderer = (WebGPURenderer *)driverData;
+
     // Wait for all fences to be signaled
     for (Uint32 i = 0; i < numFences; i += 1) {
         while (!WebGPU_QueryFence(driverData, fences[i])) {
@@ -2225,6 +2245,18 @@ static bool WebGPU_WaitForFences(
             SDL_Delay(1);
         }
     }
+
+    SDL_LockMutex(renderer->submitLock);
+
+    for (Uint32 i = renderer->submittedCommandBufferCount - 1; i >= 0; i -= 1) {
+        /*commandBuffer = renderer->submittedCommandBuffers[i];*/
+        /*WebGPU_INTERNAL_CleanCommandBuffer(renderer, commandBuffer, false);*/
+    }
+
+    // TODO: Implement this once pools are all implemented
+    /*WebGPU_INTERNAL_PerformPendingDestroys(renderer);*/
+
+    SDL_UnlockMutex(renderer->submitLock);
 
     return true;
 }
