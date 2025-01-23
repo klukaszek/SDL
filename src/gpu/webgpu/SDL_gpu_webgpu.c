@@ -37,6 +37,7 @@
 // Code compiles without these but my LSP freaks out without them
 #include <SDL3/SDL_gpu.h>
 #include <SDL3/SDL_atomic.h>
+#include <SDL3/SDL_mutex.h>
 
 // I currently have a copy of the webgpu.h file in the local include directory:
 // - usr/local/include/webgpu/webgpu.h
@@ -347,6 +348,22 @@ typedef struct WebGPUGraphicsPipeline
     SDL_AtomicInt referenceCount;
 } WebGPUGraphicsPipeline;
 
+// Fence structure
+typedef struct WebGPUFence
+{
+    SDL_AtomicInt fence;
+    SDL_AtomicInt referenceCount;
+} WebGPUFence;
+
+typedef struct WebGPUFencePool
+{
+    SDL_Mutex *lock;
+
+    WebGPUFence **availableFences;
+    Uint32 availableFenceCount;
+    Uint32 availableFenceCapacity;
+} WebGPUFencePool;
+
 // Renderer Structure
 typedef struct WebGPURenderer WebGPURenderer;
 
@@ -381,6 +398,9 @@ typedef struct WebGPUCommandBuffer
 
     // ... (other fields as needed)
 
+    WebGPUFence *inFlightFence;
+    bool autoReleaseFence;
+
 } WebGPUCommandBuffer;
 
 typedef struct WebGPURenderer
@@ -400,6 +420,8 @@ typedef struct WebGPURenderer
     WindowData **claimedWindows;
     Uint32 claimedWindowCount;
     Uint32 claimedWindowCapacity;
+
+    WebGPUFencePool fencePool;
 
     // Blit
     SDL_GPUShader *blitVertexShader;
@@ -2005,6 +2027,7 @@ static SDL_GPUCommandBuffer *WebGPU_AcquireCommandBuffer(SDL_GPURenderer *driver
         .label = "SDL_GPU Command Encoder",
     };
 
+    commandBuffer->autoReleaseFence = true;
     commandBuffer->commandEncoder = wgpuDeviceCreateCommandEncoder(renderer->device, &commandEncoderDesc);
 
     return (SDL_GPUCommandBuffer *)commandBuffer;
@@ -2044,10 +2067,13 @@ static bool WebGPU_Submit(SDL_GPUCommandBuffer *commandBuffer)
 
 static SDL_GPUFence *WebGPU_SubmitAndAcquireFence(SDL_GPUCommandBuffer *commandBuffer)
 {
-    // Just call Submit for WebGPU
-    WebGPU_Submit(commandBuffer);
-    // There are no fences in WebGPU, so we don't need to do anything here
-    return NULL;
+    WebGPUCommandBuffer *wgpu_cmd_buf = (WebGPUCommandBuffer *)commandBuffer;
+    wgpu_cmd_buf->autoReleaseFence = false;
+
+    if (!WebGPU_Submit(commandBuffer)) {
+        return NULL;
+    }
+    return (SDL_GPUFence *)(wgpu_cmd_buf->inFlightFence);
 }
 
 static bool WebGPU_Wait(SDL_GPURenderer *driverData)
@@ -4530,6 +4556,12 @@ static void WebGPU_DestroyDevice(SDL_GPUDevice *device)
         WebGPU_ReleaseWindow((SDL_GPURenderer *)renderer, renderer->claimedWindows[i]->window);
     }
 
+    // Destroy the fence pool
+    SDL_DestroyMutex(renderer->fencePool.lock);
+    for (Uint32 i = 0; i < renderer->fencePool.availableFenceCount; i += 1) {
+        SDL_free(renderer->fencePool.availableFences[i]);
+    }
+
     /*// Destroy the device*/
     wgpuDeviceDestroy(renderer->device);
     wgpuInstanceRelease(renderer->instance);
@@ -4587,6 +4619,12 @@ static SDL_GPUDevice *WebGPU_CreateDevice(bool debug, bool preferLowPower, SDL_P
 
     // Initialize all of the nessary resources for enabling blitting
     WebGPU_INTERNAL_InitBlitResources(renderer);
+
+    // Initialize our fence pool
+    renderer->fencePool.lock = SDL_CreateMutex();
+    renderer->fencePool.availableFenceCapacity = 4;
+    renderer->fencePool.availableFenceCount = 0;
+    renderer->fencePool.availableFences = (WebGPUFence **)SDL_malloc(renderer->fencePool.availableFenceCapacity * sizeof(WebGPUFence *));
 
     // Initialize our SDL_GPUDevice
     result = (SDL_GPUDevice *)SDL_malloc(sizeof(SDL_GPUDevice));
