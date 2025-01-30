@@ -19,7 +19,7 @@
   3. This notice may not be removed or altered from any source distribution.
 */
 
-#include "SDL_internal.h"
+#include "../../SDL_internal.h"
 
 // File: /webgpu/SDL_gpu_webgpu.c
 // Author: Kyle Lukaszek
@@ -45,6 +45,8 @@
 //
 // The code compiles without it as long as Emscripten is used and the -sUSE_WEBGPU flag is set
 #include <webgpu/webgpu.h>
+
+// TODO: Implement Command Bufffer pool for WebGPU. It is important to note that CommandEncoders are consumed by the CommandBuffer and are not reusable.
 
 #define MAX_UBO_SECTION_SIZE          4096 // 4   KiB
 #define DESCRIPTOR_POOL_STARTING_SIZE 128
@@ -370,6 +372,8 @@ typedef struct WebGPUFencePool
 // Renderer Structure
 typedef struct WebGPURenderer WebGPURenderer;
 
+typedef struct WebGPUCommandPool WebGPUCommandPool;
+
 // Renderer's command buffer structure
 typedef struct WebGPUCommandBuffer
 {
@@ -409,12 +413,29 @@ typedef struct WebGPUCommandBuffer
     Uint32 usedUniformBufferCount;
     Uint32 usedUniformBufferCapacity;
 
+    WebGPUCommandPool *commandPool;
+
     // ... (other fields as needed)
 
     WebGPUFence *inFlightFence;
     bool autoReleaseFence;
 
 } WebGPUCommandBuffer;
+
+typedef struct WebGPUCommandPool
+{
+    SDL_ThreadID threadID;
+
+    WebGPUCommandBuffer **activeCommandBuffers;
+    WebGPUCommandBuffer **inactiveCommandBuffers;
+    Uint32 inactiveCommandBufferCapacity;
+    Uint32 inactiveCommandBufferCount;
+} WebGPUCommandPool;
+
+typedef struct CommandPoolHashTableKey
+{
+    SDL_ThreadID threadID;
+} CommandPoolHashTableKey;
 
 typedef struct WebGPURenderer
 {
@@ -442,6 +463,17 @@ typedef struct WebGPURenderer
     Uint32 submittedCommandBufferCapacity;
 
     WebGPUFencePool fencePool;
+
+    SDL_HashTable *commandPoolHashTable;
+    SDL_HashTable *renderPassHashTable;
+    SDL_HashTable *framebufferHashTable;
+    SDL_HashTable *graphicsPipelineResourceLayoutHashTable;
+    SDL_HashTable *computePipelineResourceLayoutHashTable;
+    SDL_HashTable *descriptorSetLayoutHashTable;
+
+    /*DescriptorSetCache **descriptorSetCachePool;*/
+    Uint32 descriptorSetCachePoolCount;
+    Uint32 descriptorSetCachePoolCapacity;
 
     WebGPUUniformBuffer **uniformBufferPool;
     Uint32 uniformBufferPoolCount;
@@ -1403,7 +1435,7 @@ static void WebGPU_ReleaseBuffer(SDL_GPURenderer *driverData, SDL_GPUBuffer *buf
 
 static SDL_GPUTransferBuffer *WebGPU_CreateTransferBuffer(
     SDL_GPURenderer *driverData,
-    SDL_GPUTransferBufferUsage usage, // ignored on Vulkan
+    SDL_GPUTransferBufferUsage usage, // ignored on WebGPU
     Uint32 size,
     const char *debugName)
 {
@@ -2116,16 +2148,151 @@ static bool WebGPU_QueryFence(SDL_GPURenderer *driverData, SDL_GPUFence *fence)
     return false;
 }
 
+static bool WebGPU_INTERNAL_AllocateCommandBuffer(
+    WebGPURenderer *renderer,
+    WebGPUCommandPool *webgpuCommandPool)
+{
+    WebGPUCommandBuffer *commandBuffer;
+
+    webgpuCommandPool->inactiveCommandBufferCount += 1;
+    webgpuCommandPool->inactiveCommandBuffers = SDL_realloc(
+        webgpuCommandPool->inactiveCommandBuffers,
+        sizeof(WebGPUCommandBuffer *) *
+            webgpuCommandPool->inactiveCommandBufferCapacity);
+
+    commandBuffer = SDL_malloc(sizeof(WebGPUCommandBuffer));
+
+    // Initialize the default state of a command buffer
+    SDL_zero(*commandBuffer);
+    commandBuffer->renderer = renderer;
+    commandBuffer->commandPool = webgpuCommandPool;
+    commandBuffer->common.device = renderer->sdlDevice;
+
+    commandBuffer->autoReleaseFence = true;
+
+    commandBuffer->inFlightFence = NULL;
+
+    commandBuffer->currentGraphicsPipeline = NULL;
+
+    webgpuCommandPool->inactiveCommandBuffers[webgpuCommandPool->inactiveCommandBufferCount] = commandBuffer;
+    webgpuCommandPool->inactiveCommandBufferCount += 1;
+
+    return true;
+}
+
+static void WebGPU_INTERNAL_DestroyCommandPool(
+    WebGPURenderer *renderer,
+    WebGPUCommandPool *webgpuCommandPool)
+{
+    Uint32 i;
+    WebGPUCommandBuffer *commandBuffer;
+
+    for (i = 0; i < webgpuCommandPool->inactiveCommandBufferCount; i += 1) {
+        commandBuffer = webgpuCommandPool->inactiveCommandBuffers[i];
+
+        // TODO: Implement proper freeing once command pools are all implemented
+
+        SDL_free(commandBuffer);
+    }
+
+    SDL_free(webgpuCommandPool->inactiveCommandBuffers);
+    SDL_free(webgpuCommandPool);
+}
+
+static WebGPUCommandPool *WebGPU_INTERNAL_FetchCommandPool(
+    WebGPURenderer *renderer,
+    SDL_ThreadID threadID)
+{
+    WebGPUCommandPool *webgpuCommandPool = NULL;
+    CommandPoolHashTableKey key;
+    key.threadID = threadID;
+
+    bool result = SDL_FindInHashTable(
+        renderer->commandPoolHashTable,
+        (const void *)&key,
+        (const void **)&webgpuCommandPool);
+
+    if (result) {
+        return webgpuCommandPool;
+    }
+
+    webgpuCommandPool = (WebGPUCommandPool *)SDL_malloc(sizeof(WebGPUCommandPool));
+    webgpuCommandPool->threadID = threadID;
+
+    webgpuCommandPool->inactiveCommandBufferCapacity = 0;
+    webgpuCommandPool->inactiveCommandBufferCount = 0;
+    webgpuCommandPool->inactiveCommandBuffers = NULL;
+
+    if (!WebGPU_INTERNAL_AllocateCommandBuffer(
+            renderer,
+            webgpuCommandPool)) {
+        WebGPU_INTERNAL_DestroyCommandPool(renderer, webgpuCommandPool);
+        return NULL;
+    }
+
+    CommandPoolHashTableKey *allocedKey = SDL_malloc(sizeof(CommandPoolHashTableKey));
+    allocedKey->threadID = threadID;
+
+    SDL_InsertIntoHashTable(
+        renderer->commandPoolHashTable,
+        (const void *)allocedKey,
+        (const void *)webgpuCommandPool);
+
+    return webgpuCommandPool;
+}
+
+static WebGPUCommandBuffer *WebGPU_INTERNAL_GetInactiveCommandBufferFromPool(
+    WebGPURenderer *renderer,
+    SDL_ThreadID threadID)
+{
+    WebGPUCommandPool *commandPool =
+        WebGPU_INTERNAL_FetchCommandPool(renderer, threadID);
+    WebGPUCommandBuffer *commandBuffer;
+
+    if (commandPool == NULL) {
+        return NULL;
+    }
+
+    if (commandPool->inactiveCommandBufferCount == 0) {
+        if (!WebGPU_INTERNAL_AllocateCommandBuffer(renderer, commandPool)) {
+            return NULL;
+        }
+    }
+
+    commandBuffer = commandPool->inactiveCommandBuffers[commandPool->inactiveCommandBufferCount - 1];
+    commandPool->inactiveCommandBufferCount -= 1;
+
+    return commandBuffer;
+}
+
 static SDL_GPUCommandBuffer *WebGPU_AcquireCommandBuffer(SDL_GPURenderer *driverData)
 {
     WebGPURenderer *renderer = (WebGPURenderer *)driverData;
-    WebGPUCommandBuffer *commandBuffer = SDL_malloc(sizeof(WebGPUCommandBuffer));
+
+    SDL_ThreadID threadID = SDL_GetCurrentThreadID();
+
+    SDL_LockMutex(renderer->acquireCommandBufferLock);
+
+    WebGPUCommandBuffer *commandBuffer =
+        WebGPU_INTERNAL_GetInactiveCommandBufferFromPool(renderer, threadID);
+
+    SDL_UnlockMutex(renderer->acquireCommandBufferLock);
+
+    if (commandBuffer == NULL) {
+        return NULL;
+    }
+
+    SDL_Log("Acquired command buffer %p", commandBuffer);
+
+    // Reset state of command buffer
+
     SDL_zero(*commandBuffer);
     commandBuffer->renderer = renderer;
     commandBuffer->common.device = renderer->sdlDevice;
 
     SDL_zero(commandBuffer->layerViews);
     commandBuffer->layerViewCount = 0;
+
 
     WGPUCommandEncoderDescriptor commandEncoderDesc = {
         .label = "SDL_GPU Command Encoder",
@@ -2137,10 +2304,32 @@ static SDL_GPUCommandBuffer *WebGPU_AcquireCommandBuffer(SDL_GPURenderer *driver
     return (SDL_GPUCommandBuffer *)commandBuffer;
 }
 
+static Uint32 WebGPU_INTERNAL_CommandPoolHashFunction(const void *key, void *data)
+{
+    return (Uint32)((CommandPoolHashTableKey *)key)->threadID;
+}
+
+static bool WebGPU_INTERNAL_CommandPoolHashKeyMatch(const void *aKey, const void *bKey, void *data)
+{
+    CommandPoolHashTableKey *a = (CommandPoolHashTableKey *)aKey;
+    CommandPoolHashTableKey *b = (CommandPoolHashTableKey *)bKey;
+    return a->threadID == b->threadID;
+}
+
+static void WebGPU_INTERNAL_CommandPoolHashNuke(const void *key, const void *value, void *data)
+{
+    WebGPURenderer *renderer = (WebGPURenderer *)data;
+    WebGPUCommandPool *pool = (WebGPUCommandPool *)value;
+    WebGPU_INTERNAL_DestroyCommandPool(renderer, pool);
+    SDL_free((void *)key);
+}
+
 static bool WebGPU_Submit(SDL_GPUCommandBuffer *commandBuffer)
 {
     WebGPUCommandBuffer *wgpu_cmd_buf = (WebGPUCommandBuffer *)commandBuffer;
     WebGPURenderer *renderer = wgpu_cmd_buf->renderer;
+
+    SDL_Log("Submitting command buffer %p", wgpu_cmd_buf);
 
     // Lock the renderer's submit lock
     SDL_LockMutex(renderer->submitLock);
@@ -2160,6 +2349,8 @@ static bool WebGPU_Submit(SDL_GPUCommandBuffer *commandBuffer)
         return false;
     }
 
+    SDL_Log("Finished command buffer %p", wgpu_cmd_buf);
+
     // Create a fence for the command buffer
     wgpu_cmd_buf->inFlightFence = WebGPU_INTERNAL_AcquireFenceFromPool(renderer);
     if (wgpu_cmd_buf->inFlightFence == NULL) {
@@ -2168,11 +2359,15 @@ static bool WebGPU_Submit(SDL_GPUCommandBuffer *commandBuffer)
         return false;
     }
 
+    SDL_Log("Acquired fence %p", wgpu_cmd_buf->inFlightFence);
+
     // Command buffer has a reference to the in-flight fence
     (void)SDL_AtomicIncRef(&wgpu_cmd_buf->inFlightFence->referenceCount);
 
     // Submit the command buffer to the queue
     wgpuQueueSubmit(renderer->queue, 1, &commandHandle);
+
+    SDL_Log("Submitted command buffer %p", wgpu_cmd_buf);
 
     // Release the actual command buffer and command encoder
     wgpuCommandBufferRelease(commandHandle);
@@ -2183,8 +2378,8 @@ static bool WebGPU_Submit(SDL_GPUCommandBuffer *commandBuffer)
         wgpuTextureViewRelease(wgpu_cmd_buf->layerViews[i]);
     }
 
-    // Release the memory for the command buffer
-    SDL_free(wgpu_cmd_buf);
+    /*// Release the memory for the command buffer*/
+    /*SDL_free(wgpu_cmd_buf);*/
 
     // Unlock the renderer's submit lock
     SDL_UnlockMutex(renderer->submitLock);
@@ -2263,7 +2458,17 @@ static bool WebGPU_WaitForFences(
 
 static bool WebGPU_Cancel(SDL_GPUCommandBuffer *commandBuffer)
 {
-    // No need to do anything here, there is no canceling in WebGPU
+    WebGPURenderer *renderer;
+    WebGPUCommandBuffer *wgpuCommandBuffer;
+
+    wgpuCommandBuffer = (WebGPUCommandBuffer *)commandBuffer;
+    renderer = wgpuCommandBuffer->renderer;
+
+    wgpuCommandBuffer->autoReleaseFence = false;
+    SDL_LockMutex(renderer->submitLock);
+    /*WebGPU_INTERNAL_CleanCommandBuffer(renderer, wgpuCommandBuffer, true);*/
+    SDL_UnlockMutex(renderer->submitLock);
+
     return true;
 }
 
@@ -3586,8 +3791,8 @@ static SDL_GPUGraphicsPipeline *WebGPU_CreateGraphicsPipeline(
         .entryPoint = vertShader->entrypoint,
         .bufferCount = pipelineCreateInfo->vertex_input_state.num_vertex_buffers,
         .buffers = vertexBufferLayouts,
-        .constantCount = 0, // Leave as 0 as the Vulkan backend does not support push constants either
-        .constants = NULL,  // Leave as NULL as the Vulkan backend does not support push constants either
+        .constantCount = 0, // Leave as 0 as the WebGPU backend does not support push constants either
+        .constants = NULL,  // Leave as NULL as the WebGPU backend does not support push constants either
     };
 
     // Build the color targets for the render pipeline'
@@ -4746,6 +4951,8 @@ static void WebGPU_DestroyDevice(SDL_GPUDevice *device)
     SDL_free(renderer->fencePool.availableFences);
     SDL_DestroyMutex(renderer->fencePool.lock);
 
+    SDL_DestroyHashTable(renderer->commandPoolHashTable);
+
     // Destroy all renderer associated locks
     SDL_DestroyMutex(renderer->allocatorLock);
     SDL_DestroyMutex(renderer->disposeLock);
@@ -4775,8 +4982,7 @@ static bool WebGPU_INTERNAL_CreateWebGPUDevice(WebGPURenderer *renderer)
     }
 
     WGPURequestAdapterOptions adapter_options = {
-        .powerPreference = WGPUPowerPreference_HighPerformance,
-        .backendType = WGPUBackendType_WebGPU,
+        .backendType = WGPUBackendType_WebGPU
     };
 
     // Request adapter using the instance and then the device using the adapter (this is done in the callback)
@@ -4950,6 +5156,15 @@ static SDL_GPUDevice *WebGPU_CreateDevice(bool debug, bool preferLowPower, SDL_P
     renderer->acquireUniformBufferLock = SDL_CreateMutex();
     renderer->framebufferFetchLock = SDL_CreateMutex();
     renderer->windowLock = SDL_CreateMutex();
+
+    // manually synchronized due to submission timing
+    renderer->commandPoolHashTable = SDL_CreateHashTable(
+        (void *)renderer,
+        64,
+        WebGPU_INTERNAL_CommandPoolHashFunction,
+        WebGPU_INTERNAL_CommandPoolHashKeyMatch,
+        WebGPU_INTERNAL_CommandPoolHashNuke,
+        false, false);
 
     // Initialize our fence pool
     renderer->fencePool.lock = SDL_CreateMutex();
