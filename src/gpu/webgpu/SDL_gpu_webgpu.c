@@ -490,6 +490,37 @@ typedef struct WebGPURenderer
     SDL_GPUSampler *blitNearestSampler;
     SDL_GPUSampler *blitLinearSampler;
 
+    BlitPipelineCacheEntry *blitPipelines;
+    Uint32 blitPipelineCount;
+    Uint32 blitPipelineCapacity;
+
+    Uint32 minUBOAlignment;
+
+    // Deferred resource destruction
+    WebGPUTexture **texturesToDestroy;
+    Uint32 texturesToDestroyCount;
+    Uint32 texturesToDestroyCapacity;
+
+    WebGPUBuffer **buffersToDestroy;
+    Uint32 buffersToDestroyCount;
+    Uint32 buffersToDestroyCapacity;
+
+    WebGPUSampler **samplersToDestroy;
+    Uint32 samplersToDestroyCount;
+    Uint32 samplersToDestroyCapacity;
+
+    WebGPUGraphicsPipeline **graphicsPipelinesToDestroy;
+    Uint32 graphicsPipelinesToDestroyCount;
+    Uint32 graphicsPipelinesToDestroyCapacity;
+
+    /*WebGPUComputePipeline **computePipelinesToDestroy;*/
+    Uint32 computePipelinesToDestroyCount;
+    Uint32 computePipelinesToDestroyCapacity;
+
+    WebGPUShader **shadersToDestroy;
+    Uint32 shadersToDestroyCount;
+    Uint32 shadersToDestroyCapacity;
+
     // Thread safety
     SDL_Mutex *allocatorLock;
     SDL_Mutex *disposeLock;
@@ -498,12 +529,6 @@ typedef struct WebGPURenderer
     SDL_Mutex *acquireUniformBufferLock;
     SDL_Mutex *framebufferFetchLock;
     SDL_Mutex *windowLock;
-
-    BlitPipelineCacheEntry *blitPipelines;
-    Uint32 blitPipelineCount;
-    Uint32 blitPipelineCapacity;
-
-    Uint32 minUBOAlignment;
 
 } WebGPURenderer;
 
@@ -4987,7 +5012,6 @@ static void WebGPU_DestroyDevice(SDL_GPUDevice *device)
     WebGPU_Wait(device->driverData);
 
     // Release all blit pipelines
-    // This will eventually be removed when proper resource pool caching is implemented
     WebGPU_INTERNAL_ReleaseBlitPipelines((SDL_GPURenderer *)renderer);
 
     WebGPU_Wait(device->driverData);
@@ -4996,11 +5020,11 @@ static void WebGPU_DestroyDevice(SDL_GPUDevice *device)
     for (Sint32 i = renderer->claimedWindowCount - 1; i >= 0; i -= 1) {
         WebGPU_ReleaseWindow(device->driverData, renderer->claimedWindows[i]->window);
     }
-
     SDL_free(renderer->claimedWindows);
 
     WebGPU_Wait(device->driverData);
 
+    // Cleanup submitted command buffers
     SDL_free(renderer->submittedCommandBuffers);
 
     // Destroy uniform buffer pool
@@ -5010,16 +5034,48 @@ static void WebGPU_DestroyDevice(SDL_GPUDevice *device)
     }
     SDL_free(renderer->uniformBufferPool);
 
-    // Destroy the fence pool
+    // Cleanup hash tables
+    SDL_DestroyHashTable(renderer->commandPoolHashTable);
+    SDL_DestroyHashTable(renderer->renderPassHashTable);
+    SDL_DestroyHashTable(renderer->framebufferHashTable);
+    SDL_DestroyHashTable(renderer->graphicsPipelineResourceLayoutHashTable);
+    SDL_DestroyHashTable(renderer->computePipelineResourceLayoutHashTable);
+    SDL_DestroyHashTable(renderer->descriptorSetLayoutHashTable);
+
+    // Cleanup deferred destruction resources
+    for (Uint32 i = 0; i < renderer->texturesToDestroyCount; i++) {
+        WebGPU_ReleaseTexture(device->driverData, (SDL_GPUTexture *)renderer->texturesToDestroy[i]);
+    }
+    SDL_free(renderer->texturesToDestroy);
+
+    for (Uint32 i = 0; i < renderer->buffersToDestroyCount; i++) {
+        WebGPU_ReleaseBuffer(device->driverData, (SDL_GPUBuffer *)renderer->buffersToDestroy[i]);
+    }
+    SDL_free(renderer->buffersToDestroy);
+
+    for (Uint32 i = 0; i < renderer->samplersToDestroyCount; i++) {
+        WebGPU_ReleaseSampler(device->driverData, (SDL_GPUSampler *)renderer->samplersToDestroy[i]);
+    }
+    SDL_free(renderer->samplersToDestroy);
+
+    for (Uint32 i = 0; i < renderer->graphicsPipelinesToDestroyCount; i++) {
+        WebGPU_ReleaseGraphicsPipeline(device->driverData, (SDL_GPUGraphicsPipeline *)renderer->graphicsPipelinesToDestroy[i]);
+    }
+    SDL_free(renderer->graphicsPipelinesToDestroy);
+
+    for (Uint32 i = 0; i < renderer->shadersToDestroyCount; i++) {
+        WebGPU_ReleaseShader(device->driverData, (SDL_GPUShader *)renderer->shadersToDestroy[i]);
+    }
+    SDL_free(renderer->shadersToDestroy);
+
+    // Destroy fence pool
     for (Uint32 i = 0; i < renderer->fencePool.availableFenceCount; i += 1) {
         SDL_free(renderer->fencePool.availableFences[i]);
     }
     SDL_free(renderer->fencePool.availableFences);
     SDL_DestroyMutex(renderer->fencePool.lock);
 
-    SDL_DestroyHashTable(renderer->commandPoolHashTable);
-
-    // Destroy all renderer associated locks
+    // Destroy mutexes
     SDL_DestroyMutex(renderer->allocatorLock);
     SDL_DestroyMutex(renderer->disposeLock);
     SDL_DestroyMutex(renderer->submitLock);
@@ -5028,12 +5084,12 @@ static void WebGPU_DestroyDevice(SDL_GPUDevice *device)
     SDL_DestroyMutex(renderer->framebufferFetchLock);
     SDL_DestroyMutex(renderer->windowLock);
 
-    /*// Destroy the device*/
+    // Release WebGPU resources
     wgpuDeviceDestroy(renderer->device);
     wgpuInstanceRelease(renderer->instance);
     wgpuAdapterRelease(renderer->adapter);
 
-    // Free the renderer
+    // Free final memory
     SDL_free(renderer);
     SDL_free(device);
 }
@@ -5112,15 +5168,7 @@ static SDL_GPUDevice *WebGPU_CreateDevice(bool debug, bool preferLowPower, SDL_P
     // Initialize our SDL_GPUDevice
     result = (SDL_GPUDevice *)SDL_malloc(sizeof(SDL_GPUDevice));
 
-    /*
-    TODO: Ensure that all function signatures for the driver are correct so that the following line compiles
-          This will attach all of the driver's functions to the SDL_GPUDevice struct
-
-          i.e. result->CreateTexture = WebGPU_CreateTexture;
-               result->DestroyDevice = WebGPU_DestroyDevice;
-               ... etc.
-    */
-    /*ASSIGN_DRIVER(WebGPU)*/
+    /* Assign driver functions */
     result->driverData = (SDL_GPURenderer *)renderer;
     result->DestroyDevice = WebGPU_DestroyDevice;
     result->ClaimWindow = WebGPU_ClaimWindow;
@@ -5201,20 +5249,19 @@ static SDL_GPUDevice *WebGPU_CreateDevice(bool debug, bool preferLowPower, SDL_P
     result->driverData = (SDL_GPURenderer *)renderer;
     renderer->sdlDevice = result;
 
-    // Initialize all of the nessary resources for enabling blitting
+    // Initialize all of the necessary resources for enabling blitting
     WebGPU_INTERNAL_InitBlitResources(renderer);
 
     /*
      * Create initial swapchain array
      */
-
     SDL_Log("Creating initial swapchain array");
 
     renderer->claimedWindowCapacity = 1;
     renderer->claimedWindowCount = 0;
     renderer->claimedWindows = (WebGPUWindow **)SDL_malloc(renderer->claimedWindowCapacity * sizeof(WebGPUWindow *));
 
-    // Threading
+    // Thread safety
     renderer->allocatorLock = SDL_CreateMutex();
     renderer->disposeLock = SDL_CreateMutex();
     renderer->submitLock = SDL_CreateMutex();
@@ -5223,7 +5270,7 @@ static SDL_GPUDevice *WebGPU_CreateDevice(bool debug, bool preferLowPower, SDL_P
     renderer->framebufferFetchLock = SDL_CreateMutex();
     renderer->windowLock = SDL_CreateMutex();
 
-    // manually synchronized due to submission timing
+    // Hash tables for resource management
     renderer->commandPoolHashTable = SDL_CreateHashTable(
         (void *)renderer,
         64,
@@ -5232,27 +5279,92 @@ static SDL_GPUDevice *WebGPU_CreateDevice(bool debug, bool preferLowPower, SDL_P
         WebGPU_INTERNAL_CommandPoolHashNuke,
         false, false);
 
-    // Initialize our fence pool
+    /*renderer->renderPassHashTable = SDL_CreateHashTable(*/
+    /*    (void *)renderer,*/
+    /*    64,*/
+    /*    WebGPU_INTERNAL_RenderPassHashFunction,*/
+    /*    WebGPU_INTERNAL_RenderPassHashKeyMatch,*/
+    /*    WebGPU_INTERNAL_RenderPassHashNuke,*/
+    /*    true, false);*/
+    /**/
+    /*renderer->framebufferHashTable = SDL_CreateHashTable(*/
+    /*    (void *)renderer,*/
+    /*    64,*/
+    /*    WebGPU_INTERNAL_FramebufferHashFunction,*/
+    /*    WebGPU_INTERNAL_FramebufferHashKeyMatch,*/
+    /*    WebGPU_INTERNAL_FramebufferHashNuke,*/
+    /*    false, false);*/
+    /**/
+    /*renderer->graphicsPipelineResourceLayoutHashTable = SDL_CreateHashTable(*/
+    /*    (void *)renderer,*/
+    /*    64,*/
+    /*    WebGPU_INTERNAL_GraphicsPipelineResourceLayoutHashFunction,*/
+    /*    WebGPU_INTERNAL_GraphicsPipelineResourceLayoutHashKeyMatch,*/
+    /*    WebGPU_INTERNAL_GraphicsPipelineResourceLayoutHashNuke,*/
+    /*    true, false);*/
+    /**/
+    /*renderer->computePipelineResourceLayoutHashTable = SDL_CreateHashTable(*/
+    /*    (void *)renderer,*/
+    /*    64,*/
+    /*    WebGPU_INTERNAL_ComputePipelineResourceLayoutHashFunction,*/
+    /*    WebGPU_INTERNAL_ComputePipelineResourceLayoutHashKeyMatch,*/
+    /*    WebGPU_INTERNAL_ComputePipelineResourceLayoutHashNuke,*/
+    /*    true, false);*/
+    /**/
+    /*renderer->descriptorSetLayoutHashTable = SDL_CreateHashTable(*/
+    /*    (void *)renderer,*/
+    /*    64,*/
+    /*    WebGPU_INTERNAL_DescriptorSetLayoutHashFunction,*/
+    /*    WebGPU_INTERNAL_DescriptorSetLayoutHashKeyMatch,*/
+    /*    WebGPU_INTERNAL_DescriptorSetLayoutHashNuke,*/
+    /*    true, false);*/
+
+    // Fence pool initialization
     renderer->fencePool.lock = SDL_CreateMutex();
     renderer->fencePool.availableFenceCapacity = 4;
     renderer->fencePool.availableFenceCount = 0;
     renderer->fencePool.availableFences = SDL_malloc(renderer->fencePool.availableFenceCapacity * sizeof(WebGPUFence *));
 
-    // Create submitted command buffer array
+    // Submitted command buffers
     renderer->submittedCommandBufferCapacity = 16;
     renderer->submittedCommandBufferCount = 0;
     renderer->submittedCommandBuffers = SDL_malloc(renderer->submittedCommandBufferCapacity * sizeof(WebGPUCommandBuffer *));
 
-    // Create uniform buffer pool
+    // Uniform buffer pool
     renderer->uniformBufferPoolCount = 32;
     renderer->uniformBufferPoolCapacity = 32;
     renderer->uniformBufferPool = SDL_malloc(renderer->uniformBufferPoolCapacity * sizeof(WebGPUUniformBuffer *));
-
     for (i = 0; i < renderer->uniformBufferPoolCount; i += 1) {
-        renderer->uniformBufferPool[i] = WebGPU_INTERNAL_CreateUniformBuffer(
-            renderer,
-            UNIFORM_BUFFER_SIZE);
+        renderer->uniformBufferPool[i] = WebGPU_INTERNAL_CreateUniformBuffer(renderer, UNIFORM_BUFFER_SIZE);
     }
+
+    // Deferred resource destruction arrays
+    renderer->texturesToDestroyCapacity = 16;
+    renderer->texturesToDestroyCount = 0;
+    renderer->texturesToDestroy = (WebGPUTexture **)SDL_malloc(renderer->texturesToDestroyCapacity * sizeof(WebGPUTexture *));
+
+    renderer->buffersToDestroyCapacity = 16;
+    renderer->buffersToDestroyCount = 0;
+    renderer->buffersToDestroy = (WebGPUBuffer **)SDL_malloc(renderer->buffersToDestroyCapacity * sizeof(WebGPUBuffer *));
+
+    renderer->samplersToDestroyCapacity = 16;
+    renderer->samplersToDestroyCount = 0;
+    renderer->samplersToDestroy = (WebGPUSampler **)SDL_malloc(renderer->samplersToDestroyCapacity * sizeof(WebGPUSampler *));
+
+    renderer->graphicsPipelinesToDestroyCapacity = 16;
+    renderer->graphicsPipelinesToDestroyCount = 0;
+    renderer->graphicsPipelinesToDestroy = (WebGPUGraphicsPipeline **)SDL_malloc(renderer->graphicsPipelinesToDestroyCapacity * sizeof(WebGPUGraphicsPipeline *));
+
+    renderer->computePipelinesToDestroyCount = 0;
+    renderer->computePipelinesToDestroyCapacity = 16;
+
+    renderer->shadersToDestroyCapacity = 16;
+    renderer->shadersToDestroyCount = 0;
+    renderer->shadersToDestroy = (WebGPUShader **)SDL_malloc(renderer->shadersToDestroyCapacity * sizeof(WebGPUShader *));
+
+    // Descriptor set cache pool
+    renderer->descriptorSetCachePoolCount = 0;
+    renderer->descriptorSetCachePoolCapacity = 8;
 
     SDL_Log("WebGPU device created");
 
