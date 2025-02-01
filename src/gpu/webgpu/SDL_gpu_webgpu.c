@@ -2092,11 +2092,17 @@ static WebGPUFence *WebGPU_INTERNAL_AcquireFenceFromPool(WebGPURenderer *rendere
 {
     WebGPUFence *handle;
 
+    /*SDL_Log("Acquiring fence from pool");*/
+
     if (renderer->fencePool.availableFenceCount == 0) {
-        handle = SDL_malloc(sizeof(WebGPUFence));
+        /*SDL_Log("Creating new fence");*/
+        handle = (WebGPUFence *)SDL_malloc(sizeof(WebGPUFence));
+        /*SDL_Log("Allocated fence %p", handle);*/
         SDL_SetAtomicInt(&handle->referenceCount, 0);
         return handle;
     }
+
+    /*SDL_Log("Reusing fence from pool");*/
 
     SDL_LockMutex(renderer->fencePool.lock);
 
@@ -2148,34 +2154,249 @@ static bool WebGPU_QueryFence(SDL_GPURenderer *driverData, SDL_GPUFence *fence)
     return false;
 }
 
+static void WebGPU_ReleaseFence(SDL_GPURenderer *driverData, SDL_GPUFence *fence)
+{
+    WebGPUFence *handle = (WebGPUFence *)fence;
+    if (SDL_AtomicDecRef(&handle->referenceCount)) {
+        WebGPU_INTERNAL_ReturnFenceToPool((WebGPURenderer *)driverData, handle);
+    }
+}
+
 static bool WebGPU_INTERNAL_AllocateCommandBuffer(
     WebGPURenderer *renderer,
     WebGPUCommandPool *webgpuCommandPool)
 {
     WebGPUCommandBuffer *commandBuffer;
 
-    webgpuCommandPool->inactiveCommandBufferCount += 1;
-    webgpuCommandPool->inactiveCommandBuffers = SDL_realloc(
-        webgpuCommandPool->inactiveCommandBuffers,
-        sizeof(WebGPUCommandBuffer *) *
-            webgpuCommandPool->inactiveCommandBufferCapacity);
+    // Check if expansion is needed before incrementing the count
+    if (webgpuCommandPool->inactiveCommandBufferCount + 1 > webgpuCommandPool->inactiveCommandBufferCapacity) {
+        Uint32 newCapacity = webgpuCommandPool->inactiveCommandBufferCapacity * 2;
+        newCapacity = newCapacity > 0 ? newCapacity : 1; // Handle initial capacity of 0
+        WebGPUCommandBuffer **newArray = (WebGPUCommandBuffer **)SDL_realloc(
+            webgpuCommandPool->inactiveCommandBuffers,
+            sizeof(WebGPUCommandBuffer *) * newCapacity);
+        if (!newArray) {
+            SDL_LogError(SDL_LOG_CATEGORY_GPU, "Failed to expand command buffer array");
+            return false;
+        }
+        webgpuCommandPool->inactiveCommandBuffers = newArray;
+        webgpuCommandPool->inactiveCommandBufferCapacity = newCapacity;
+    }
 
-    commandBuffer = SDL_malloc(sizeof(WebGPUCommandBuffer));
+    // Allocate and initialize the new command buffer
+    commandBuffer = (WebGPUCommandBuffer *)SDL_malloc(sizeof(WebGPUCommandBuffer));
+    if (!commandBuffer) {
+        SDL_LogError(SDL_LOG_CATEGORY_GPU, "Failed to allocate command buffer");
+        return false;
+    }
 
-    // Initialize the default state of a command buffer
+    SDL_Log("Allocating command buffer: %p", commandBuffer);
+
     SDL_zero(*commandBuffer);
     commandBuffer->renderer = renderer;
     commandBuffer->commandPool = webgpuCommandPool;
     commandBuffer->common.device = renderer->sdlDevice;
-
     commandBuffer->autoReleaseFence = true;
-
     commandBuffer->inFlightFence = NULL;
-
     commandBuffer->currentGraphicsPipeline = NULL;
 
+    // Add to the array and update count
     webgpuCommandPool->inactiveCommandBuffers[webgpuCommandPool->inactiveCommandBufferCount] = commandBuffer;
     webgpuCommandPool->inactiveCommandBufferCount += 1;
+
+    return true;
+}
+
+static void WebGPU_INTERNAL_CleanCommandBuffer(
+    WebGPURenderer *renderer,
+    WebGPUCommandBuffer *commandBuffer,
+    bool cancel)
+{
+    if (commandBuffer->autoReleaseFence) {
+        WebGPU_ReleaseFence(
+            (SDL_GPURenderer *)renderer,
+            (SDL_GPUFence *)commandBuffer->inFlightFence);
+
+        commandBuffer->inFlightFence = NULL;
+    }
+
+
+    SDL_LockMutex(renderer->acquireUniformBufferLock);
+
+    for (Sint32 i = 0; i < commandBuffer->usedUniformBufferCount; i += 1) {
+        /*WebGPU_INTERNAL_ReturnUniformBufferToPool(*/
+        /*    renderer,*/
+        /*    commandBuffer->usedUniformBuffers[i]);*/
+    }
+    commandBuffer->usedUniformBufferCount = 0;
+
+    SDL_UnlockMutex(renderer->acquireUniformBufferLock);
+
+    SDL_LockMutex(renderer->acquireCommandBufferLock);
+
+    /*SDL_Log("Command Buffer Pool %p", commandBuffer->commandPool);*/
+
+    if (commandBuffer->commandPool->inactiveCommandBufferCount == commandBuffer->commandPool->inactiveCommandBufferCapacity) {
+        commandBuffer->commandPool->inactiveCommandBufferCapacity += 1;
+        commandBuffer->commandPool->inactiveCommandBuffers = SDL_realloc(
+            commandBuffer->commandPool->inactiveCommandBuffers,
+            commandBuffer->commandPool->inactiveCommandBufferCapacity * sizeof(WebGPUCommandBuffer*));
+    }
+
+    commandBuffer->commandPool->inactiveCommandBuffers[commandBuffer->commandPool->inactiveCommandBufferCount] = commandBuffer;
+    commandBuffer->commandPool->inactiveCommandBufferCount += 1;
+
+    SDL_UnlockMutex(renderer->acquireCommandBufferLock);
+}
+
+
+static bool WebGPU_Submit(SDL_GPUCommandBuffer *commandBuffer)
+{
+    WebGPUCommandBuffer *wgpu_cmd_buf = (WebGPUCommandBuffer *)commandBuffer;
+    WebGPURenderer *renderer = wgpu_cmd_buf->renderer;
+
+    /*SDL_Log("Submitting command buffer %p", wgpu_cmd_buf);*/
+
+    // Lock the renderer's submit lock
+    SDL_LockMutex(renderer->submitLock);
+
+    WGPUCommandBufferDescriptor commandBufferDesc = {
+        .label = "SDL_GPU Command Buffer",
+    };
+
+    // Finish the command buffer and submit it to the queue
+    WGPUCommandBuffer commandHandle = wgpuCommandEncoderFinish(
+        wgpu_cmd_buf->commandEncoder,
+        &commandBufferDesc);
+
+    if (!commandHandle) {
+        SDL_LogError(SDL_LOG_CATEGORY_GPU, "Failed to finish command buffer");
+        SDL_UnlockMutex(renderer->submitLock);
+        return false;
+    }
+
+    /*SDL_Log("Finished command buffer %p", wgpu_cmd_buf);*/
+
+    // Create a fence for the command buffer
+    wgpu_cmd_buf->inFlightFence = WebGPU_INTERNAL_AcquireFenceFromPool(renderer);
+    if (wgpu_cmd_buf->inFlightFence == NULL) {
+        SDL_LogError(SDL_LOG_CATEGORY_GPU, "Failed to acquire fence from pool");
+        SDL_UnlockMutex(renderer->submitLock);
+        return false;
+    }
+
+    /*SDL_Log("Acquired fence %p", wgpu_cmd_buf->inFlightFence);*/
+
+    // Command buffer has a reference to the in-flight fence
+    (void)SDL_AtomicIncRef(&wgpu_cmd_buf->inFlightFence->referenceCount);
+
+    // Submit the command buffer to the queue
+    wgpuQueueSubmit(renderer->queue, 1, &commandHandle);
+
+    /*SDL_Log("Submitted command buffer %p", wgpu_cmd_buf);*/
+
+    // Release the actual command buffer and command encoder
+    wgpuCommandBufferRelease(commandHandle);
+    wgpuCommandEncoderRelease(wgpu_cmd_buf->commandEncoder);
+
+    // Release any layer views that were created
+    for (Uint32 i = 0; i < wgpu_cmd_buf->layerViewCount; i += 1) {
+        wgpuTextureViewRelease(wgpu_cmd_buf->layerViews[i]);
+    }
+
+    /*// Release the memory for the command buffer*/
+    WebGPU_INTERNAL_CleanCommandBuffer(renderer, wgpu_cmd_buf, false);
+
+    /*SDL_Log("Cleaned command buffer %p", commandBuffer);*/
+
+    // Unlock the renderer's submit lock
+    SDL_UnlockMutex(renderer->submitLock);
+
+    return true;
+}
+
+static SDL_GPUFence *WebGPU_SubmitAndAcquireFence(SDL_GPUCommandBuffer *commandBuffer)
+{
+    WebGPUCommandBuffer *wgpu_cmd_buf = (WebGPUCommandBuffer *)commandBuffer;
+    wgpu_cmd_buf->autoReleaseFence = false;
+    if (!WebGPU_Submit(commandBuffer)) {
+        return NULL;
+    }
+    wgpuQueueOnSubmittedWorkDone(wgpu_cmd_buf->renderer->queue, WebGPU_INTERNAL_FenceCallback, wgpu_cmd_buf->inFlightFence);
+    return (SDL_GPUFence *)(wgpu_cmd_buf->inFlightFence);
+}
+
+static bool WebGPU_Wait(SDL_GPURenderer *driverData)
+{
+    WebGPURenderer *renderer = (WebGPURenderer *)driverData;
+    WebGPUCommandBuffer *commandBuffer;
+    Sint32 i;
+
+    // We pass control to the browser so it can tick the device for us
+    // The device ticking is necessary for the QueueOnSubmittedWorkDone callback to be called and set the atomic flag.
+    // This will need to be changed for native WebGPU implementations.
+    SDL_Delay(1);
+
+    SDL_LockMutex(renderer->submitLock);
+
+    for (i = renderer->submittedCommandBufferCount - 1; i >= 0; i -= 1) {
+        commandBuffer = renderer->submittedCommandBuffers[i];
+        WebGPU_INTERNAL_CleanCommandBuffer(renderer, commandBuffer, false);
+    }
+
+    SDL_UnlockMutex(renderer->submitLock);
+
+    // TODO: Implement this once pools are all implemented
+    /*WebGPU_INTERNAL_PerformPendingDestroys(renderer);*/
+
+    return true;
+}
+
+static bool WebGPU_WaitForFences(
+    SDL_GPURenderer *driverData,
+    bool waitAll,
+    SDL_GPUFence *const *fences,
+    Uint32 numFences)
+{
+    WebGPURenderer *renderer = (WebGPURenderer *)driverData;
+    WebGPUCommandBuffer *commandBuffer;
+
+    // Wait for all fences to be signaled
+    for (Uint32 i = 0; i < numFences; i += 1) {
+        while (!WebGPU_QueryFence(driverData, fences[i])) {
+            // Pass control to the browser so it can tick the device for us
+            // The device ticking is necessary for the QueueOnSubmittedWorkDone callback to be called and set the atomic flag.
+            SDL_Delay(1);
+        }
+    }
+
+    SDL_LockMutex(renderer->submitLock);
+
+    for (Uint32 i = renderer->submittedCommandBufferCount - 1; i >= 0; i -= 1) {
+        commandBuffer = renderer->submittedCommandBuffers[i];
+        WebGPU_INTERNAL_CleanCommandBuffer(renderer, commandBuffer, false);
+    }
+
+    // TODO: Implement this once pools are all implemented
+    /*WebGPU_INTERNAL_PerformPendingDestroys(renderer);*/
+
+    SDL_UnlockMutex(renderer->submitLock);
+
+    return true;
+}
+
+static bool WebGPU_Cancel(SDL_GPUCommandBuffer *commandBuffer)
+{
+    WebGPURenderer *renderer;
+    WebGPUCommandBuffer *wgpuCommandBuffer;
+
+    wgpuCommandBuffer = (WebGPUCommandBuffer *)commandBuffer;
+    renderer = wgpuCommandBuffer->renderer;
+
+    wgpuCommandBuffer->autoReleaseFence = false;
+    SDL_LockMutex(renderer->submitLock);
+    WebGPU_INTERNAL_CleanCommandBuffer(renderer, wgpuCommandBuffer, true);
+    SDL_UnlockMutex(renderer->submitLock);
 
     return true;
 }
@@ -2282,13 +2503,14 @@ static SDL_GPUCommandBuffer *WebGPU_AcquireCommandBuffer(SDL_GPURenderer *driver
         return NULL;
     }
 
-    SDL_Log("Acquired command buffer %p", commandBuffer);
+    /*SDL_Log("Acquired command buffer %p", commandBuffer);*/
 
     // Reset state of command buffer
 
     SDL_zero(*commandBuffer);
     commandBuffer->renderer = renderer;
     commandBuffer->common.device = renderer->sdlDevice;
+    commandBuffer->commandPool = WebGPU_INTERNAL_FetchCommandPool(renderer, threadID);
 
     SDL_zero(commandBuffer->layerViews);
     commandBuffer->layerViewCount = 0;
@@ -2322,162 +2544,6 @@ static void WebGPU_INTERNAL_CommandPoolHashNuke(const void *key, const void *val
     WebGPUCommandPool *pool = (WebGPUCommandPool *)value;
     WebGPU_INTERNAL_DestroyCommandPool(renderer, pool);
     SDL_free((void *)key);
-}
-
-static bool WebGPU_Submit(SDL_GPUCommandBuffer *commandBuffer)
-{
-    WebGPUCommandBuffer *wgpu_cmd_buf = (WebGPUCommandBuffer *)commandBuffer;
-    WebGPURenderer *renderer = wgpu_cmd_buf->renderer;
-
-    SDL_Log("Submitting command buffer %p", wgpu_cmd_buf);
-
-    // Lock the renderer's submit lock
-    SDL_LockMutex(renderer->submitLock);
-
-    WGPUCommandBufferDescriptor commandBufferDesc = {
-        .label = "SDL_GPU Command Buffer",
-    };
-
-    // Finish the command buffer and submit it to the queue
-    WGPUCommandBuffer commandHandle = wgpuCommandEncoderFinish(
-        wgpu_cmd_buf->commandEncoder,
-        &commandBufferDesc);
-
-    if (!commandHandle) {
-        SDL_LogError(SDL_LOG_CATEGORY_GPU, "Failed to finish command buffer");
-        SDL_UnlockMutex(renderer->submitLock);
-        return false;
-    }
-
-    SDL_Log("Finished command buffer %p", wgpu_cmd_buf);
-
-    // Create a fence for the command buffer
-    wgpu_cmd_buf->inFlightFence = WebGPU_INTERNAL_AcquireFenceFromPool(renderer);
-    if (wgpu_cmd_buf->inFlightFence == NULL) {
-        SDL_LogError(SDL_LOG_CATEGORY_GPU, "Failed to acquire fence from pool");
-        SDL_UnlockMutex(renderer->submitLock);
-        return false;
-    }
-
-    SDL_Log("Acquired fence %p", wgpu_cmd_buf->inFlightFence);
-
-    // Command buffer has a reference to the in-flight fence
-    (void)SDL_AtomicIncRef(&wgpu_cmd_buf->inFlightFence->referenceCount);
-
-    // Submit the command buffer to the queue
-    wgpuQueueSubmit(renderer->queue, 1, &commandHandle);
-
-    SDL_Log("Submitted command buffer %p", wgpu_cmd_buf);
-
-    // Release the actual command buffer and command encoder
-    wgpuCommandBufferRelease(commandHandle);
-    wgpuCommandEncoderRelease(wgpu_cmd_buf->commandEncoder);
-
-    // Release any layer views that were created
-    for (Uint32 i = 0; i < wgpu_cmd_buf->layerViewCount; i += 1) {
-        wgpuTextureViewRelease(wgpu_cmd_buf->layerViews[i]);
-    }
-
-    /*// Release the memory for the command buffer*/
-    /*SDL_free(wgpu_cmd_buf);*/
-
-    // Unlock the renderer's submit lock
-    SDL_UnlockMutex(renderer->submitLock);
-
-    return true;
-}
-
-static SDL_GPUFence *WebGPU_SubmitAndAcquireFence(SDL_GPUCommandBuffer *commandBuffer)
-{
-    WebGPUCommandBuffer *wgpu_cmd_buf = (WebGPUCommandBuffer *)commandBuffer;
-    wgpu_cmd_buf->autoReleaseFence = false;
-    if (!WebGPU_Submit(commandBuffer)) {
-        return NULL;
-    }
-    wgpuQueueOnSubmittedWorkDone(wgpu_cmd_buf->renderer->queue, WebGPU_INTERNAL_FenceCallback, wgpu_cmd_buf->inFlightFence);
-    return (SDL_GPUFence *)(wgpu_cmd_buf->inFlightFence);
-}
-
-static bool WebGPU_Wait(SDL_GPURenderer *driverData)
-{
-    WebGPURenderer *renderer = (WebGPURenderer *)driverData;
-    /*WebGPUCommandBuffer *commandBuffer;*/
-    Sint32 i;
-
-    // We pass control to the browser so it can tick the device for us
-    // The device ticking is necessary for the QueueOnSubmittedWorkDone callback to be called and set the atomic flag.
-    // This will need to be changed for native WebGPU implementations.
-    SDL_Delay(1);
-
-    SDL_LockMutex(renderer->submitLock);
-
-    for (i = renderer->submittedCommandBufferCount - 1; i >= 0; i -= 1) {
-        /*commandBuffer = renderer->submittedCommandBuffers[i];*/
-        /*WebGPU_INTERNAL_CleanCommandBuffer(renderer, commandBuffer, false);*/
-    }
-
-    SDL_UnlockMutex(renderer->submitLock);
-
-    // TODO: Implement this once pools are all implemented
-    /*WebGPU_INTERNAL_PerformPendingDestroys(renderer);*/
-
-    return true;
-}
-
-static bool WebGPU_WaitForFences(
-    SDL_GPURenderer *driverData,
-    bool waitAll,
-    SDL_GPUFence *const *fences,
-    Uint32 numFences)
-{
-    WebGPURenderer *renderer = (WebGPURenderer *)driverData;
-
-    // Wait for all fences to be signaled
-    for (Uint32 i = 0; i < numFences; i += 1) {
-        while (!WebGPU_QueryFence(driverData, fences[i])) {
-            // Pass control to the browser so it can tick the device for us
-            // The device ticking is necessary for the QueueOnSubmittedWorkDone callback to be called and set the atomic flag.
-            SDL_Delay(1);
-        }
-    }
-
-    SDL_LockMutex(renderer->submitLock);
-
-    for (Uint32 i = renderer->submittedCommandBufferCount - 1; i >= 0; i -= 1) {
-        /*commandBuffer = renderer->submittedCommandBuffers[i];*/
-        /*WebGPU_INTERNAL_CleanCommandBuffer(renderer, commandBuffer, false);*/
-    }
-
-    // TODO: Implement this once pools are all implemented
-    /*WebGPU_INTERNAL_PerformPendingDestroys(renderer);*/
-
-    SDL_UnlockMutex(renderer->submitLock);
-
-    return true;
-}
-
-static bool WebGPU_Cancel(SDL_GPUCommandBuffer *commandBuffer)
-{
-    WebGPURenderer *renderer;
-    WebGPUCommandBuffer *wgpuCommandBuffer;
-
-    wgpuCommandBuffer = (WebGPUCommandBuffer *)commandBuffer;
-    renderer = wgpuCommandBuffer->renderer;
-
-    wgpuCommandBuffer->autoReleaseFence = false;
-    SDL_LockMutex(renderer->submitLock);
-    /*WebGPU_INTERNAL_CleanCommandBuffer(renderer, wgpuCommandBuffer, true);*/
-    SDL_UnlockMutex(renderer->submitLock);
-
-    return true;
-}
-
-static void WebGPU_ReleaseFence(SDL_GPURenderer *driverData, SDL_GPUFence *fence)
-{
-    WebGPUFence *handle = (WebGPUFence *)fence;
-    if (SDL_AtomicDecRef(&handle->referenceCount)) {
-        WebGPU_INTERNAL_ReturnFenceToPool((WebGPURenderer *)driverData, handle);
-    }
 }
 
 void WebGPU_SetViewport(SDL_GPUCommandBuffer *renderPass, const SDL_GPUViewport *viewport)
