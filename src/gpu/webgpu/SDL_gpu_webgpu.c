@@ -24,7 +24,6 @@
 // File: /webgpu/SDL_gpu_webgpu.c
 // Author: Kyle Lukaszek
 // Email: kylelukaszek [at] gmail [dot] com
-// License: Zlib
 // Description: WebGPU driver for SDL_gpu using the emscripten WebGPU implementation
 // Note: Compiling SDL GPU programs using emscripten will require -sUSE_WEBGPU=1 -sASYNCIFY=1
 
@@ -436,6 +435,37 @@ typedef struct CommandPoolHashTableKey
 {
     SDL_ThreadID threadID;
 } CommandPoolHashTableKey;
+
+typedef struct RenderPassColorTargetDescription
+{
+    WGPUTextureFormat format;
+    SDL_GPULoadOp loadOp;
+    SDL_GPUStoreOp storeOp;
+} RenderPassColorTargetDescription;
+
+typedef struct RenderPassDepthStencilTargetDescription
+{
+    WGPUTextureFormat format;
+    SDL_GPULoadOp loadOp;
+    SDL_GPUStoreOp storeOp;
+    SDL_GPULoadOp stencilLoadOp;
+    SDL_GPUStoreOp stencilStoreOp;
+} RenderPassDepthStencilTargetDescription;
+
+typedef struct RenderPassHashTableKey
+{
+    RenderPassColorTargetDescription colorTargetDescriptions[MAX_COLOR_TARGET_BINDINGS];
+    Uint32 numColorTargets;
+    WGPUTextureFormat resolveTargetFormats[MAX_COLOR_TARGET_BINDINGS];
+    Uint32 numResolveTargets;
+    RenderPassDepthStencilTargetDescription depthStencilTargetDescription;
+    Uint32 sampleCount;
+} RenderPassHashTableKey;
+
+typedef struct WebGPURenderPassHashTableValue
+{
+    WebGPUCommandBuffer handle;
+} WebGPURenderPassHashTableValue;
 
 typedef struct WebGPURenderer
 {
@@ -5159,7 +5189,7 @@ static SDL_GPUDevice *WebGPU_CreateDevice(bool debug, bool preferLowPower, SDL_P
     }
 
     SDL_Log("SDL_GPU Driver: WebGPU");
-    SDL_Log("WebGPU Device: %s",
+    SDL_Log("WebGPU Device: %s (Only for debugging purposes, not feature detection)",
             renderer->adapterInfo.description);
 
     // Keep track of the minimum uniform buffer alignment
