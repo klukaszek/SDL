@@ -373,6 +373,11 @@ static inline Uint32 BytesPerRow(
     return blocksPerRow * SDL_GPUTextureFormatTexelBlockSize(format);
 }
 
+static inline Uint32 NextHighestAlignment(Uint32 n, Uint32 align)
+{
+    return align * ((n + align - 1) / align);
+}
+
 // GraphicsDevice Limits
 
 #define MAX_TEXTURE_SAMPLERS_PER_STAGE 16
