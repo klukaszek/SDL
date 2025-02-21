@@ -240,6 +240,8 @@ typedef struct WebGPUBuffer
 {
     WGPUBuffer handle;
     bool isMapped;
+    void *mappedData;
+    Uint32 size;
     SDL_AtomicInt refCount;
     char *debugName;
 } WebGPUBuffer;
@@ -257,6 +259,26 @@ typedef struct WebGPUBufferContainer
     bool isWriteOnly;
     char *debugName;
 } WebGPUBufferContainer;
+
+typedef struct MapCallbackData
+{
+    WebGPUBuffer *buffer;
+    SDL_AtomicInt mapped; // 0 = unmapped, 1 = mapped
+} MapCallbackData;
+
+static void MapCallback(WGPUBufferMapAsyncStatus status, void *userdata)
+{
+    MapCallbackData *data = (MapCallbackData *)userdata;
+    if (status == WGPUBufferMapAsyncStatus_Success) {
+        data->buffer->mappedData = wgpuBufferGetMappedRange(data->buffer->handle, 0, data->buffer->size);
+        data->buffer->isMapped = true;
+        SDL_SetAtomicInt(&data->mapped, 1);
+    } else {
+        SDL_LogError(SDL_LOG_CATEGORY_GPU, "Buffer map failed: %d", status);
+        SDL_SetAtomicInt(&data->mapped, -1);
+    }
+    SDL_free(data);
+}
 
 typedef struct WebGPUUniformBuffer
 {
@@ -506,6 +528,18 @@ static void WebGPU_INTERNAL_TrackTexture(
         usedTextures,
         usedTextureCount,
         usedTextureCapacity);
+}
+
+static void WebGPU_INTERNAL_TrackBuffer(
+    WebGPUCommandBuffer *commandBuffer,
+    WebGPUBuffer *buffer)
+{
+    TRACK_RESOURCE(
+        buffer,
+        WebGPUBuffer *,
+        usedBuffers,
+        usedBufferCount,
+        usedBufferCapacity);
 }
 
 static void WebGPU_INTERNAL_TrackUniformBuffer(
@@ -1652,28 +1686,40 @@ static WebGPUBuffer *WebGPU_INTERNAL_CreateBuffer(
     WGPUBufferUsageFlags usage,
     const char *debugName)
 {
-    WGPUBuffer bufferHandle;
-    WebGPUBuffer *webgpuBuffer;
+    bool needsMapping = (usage & (WGPUBufferUsage_MapWrite | WGPUBufferUsage_MapRead)) != 0;
+    WGPUBufferDescriptor bufferDesc = {
+        .usage = usage, // Use provided usage as-is
+        .size = size,
+        .mappedAtCreation = needsMapping,
+        .label = debugName
+    };
 
-    // Storage buffers have to be 4-aligned in WebGPU
-    size = NextHighestAlignment(size, 4);
-
-    bufferHandle = wgpuDeviceCreateBuffer(renderer->device, &(WGPUBufferDescriptor){
-                                                                .size = size,
-                                                                .usage = usage,
-                                                                .mappedAtCreation = false,
-                                                            });
-    if (!bufferHandle) {
-        SET_STRING_ERROR_AND_RETURN("Failed to create buffer", NULL);
+    WGPUBuffer buffer = wgpuDeviceCreateBuffer(renderer->device, &bufferDesc);
+    if (!buffer) {
+        SDL_LogError(SDL_LOG_CATEGORY_GPU, "Failed to create buffer: %s", debugName);
+        return NULL;
     }
 
-    webgpuBuffer = SDL_calloc(1, sizeof(WebGPUBuffer));
-    webgpuBuffer->handle = bufferHandle;
-    SDL_SetAtomicInt(&webgpuBuffer->refCount, 0);
+    WebGPUBuffer *webgpuBuffer = SDL_calloc(1, sizeof(WebGPUBuffer));
+    if (!webgpuBuffer) {
+        wgpuBufferDestroy(buffer);
+        return NULL;
+    }
 
-    if (debugName) {
-        webgpuBuffer->debugName = SDL_strdup(debugName);
-    };
+    webgpuBuffer->handle = buffer;
+    webgpuBuffer->isMapped = needsMapping;
+    if (needsMapping) {
+        webgpuBuffer->mappedData = wgpuBufferGetMappedRange(buffer, 0, size);
+        webgpuBuffer->size = size;
+    } else {
+        webgpuBuffer->mappedData = NULL;
+        webgpuBuffer->size = 0;
+    }
+    SDL_AtomicDecRef(&webgpuBuffer->refCount);
+
+    if (renderer->debugMode) {
+        SDL_Log("WebGPU: Created buffer %p, usage=0x%x, mapped=%d", webgpuBuffer, usage, needsMapping);
+    }
 
     return webgpuBuffer;
 }
@@ -1684,39 +1730,181 @@ static WebGPUBufferContainer *WebGPU_INTERNAL_CreateBufferContainer(
     Uint32 size,
     bool isPrivate,
     bool isWriteOnly,
+    SDL_GPUBufferUsageFlags bufferUsage, // Updated to SDL_GPUBufferUsageFlags
     const char *debugName)
 {
-    WebGPUBufferContainer *container = mrp_autorelease_alloc(sizeof(WebGPUBufferContainer));
-    WGPUBufferUsageFlags usage = WGPUBufferUsage_CopySrc | WGPUBufferUsage_CopyDst;
+    WebGPUBufferContainer *container = SDL_malloc(sizeof(WebGPUBufferContainer));
+    if (!container) {
+        SDL_LogError(SDL_LOG_CATEGORY_GPU, "Failed to allocate buffer container");
+        return NULL;
+    }
+
+    WGPUBufferUsageFlags usage = 0;
+
+    if (!isPrivate) {
+        if (isWriteOnly) {
+            usage = WGPUBufferUsage_MapWrite | WGPUBufferUsage_CopySrc; // Upload buffer
+            if (bufferUsage != 0) {
+                SDL_LogWarn(SDL_LOG_CATEGORY_GPU,
+                           "Transfer buffer (MapWrite) ignores bufferUsage 0x%x for %s",
+                           bufferUsage, debugName ? debugName : "unnamed");
+            }
+        } else {
+            usage = WGPUBufferUsage_MapRead | WGPUBufferUsage_CopyDst; // Download buffer
+            if (bufferUsage != 0) {
+                SDL_LogWarn(SDL_LOG_CATEGORY_GPU,
+                           "Transfer buffer (MapRead) ignores bufferUsage 0x%x for %s",
+                           bufferUsage, debugName ? debugName : "unnamed");
+            }
+        }
+    } else {
+        usage = WGPUBufferUsage_CopySrc | WGPUBufferUsage_CopyDst; // Base for GPU buffers
+        if (bufferUsage & SDL_GPU_BUFFERUSAGE_VERTEX) {
+            usage |= WGPUBufferUsage_Vertex;
+        }
+        if (bufferUsage & SDL_GPU_BUFFERUSAGE_INDEX) {
+            usage |= WGPUBufferUsage_Index;
+        }
+        if (bufferUsage & SDL_GPU_BUFFERUSAGE_INDIRECT) {
+            usage |= WGPUBufferUsage_Indirect;
+        }
+        if (bufferUsage & SDL_GPU_BUFFERUSAGE_GRAPHICS_STORAGE_READ ||
+            bufferUsage & SDL_GPU_BUFFERUSAGE_COMPUTE_STORAGE_READ) {
+            usage |= WGPUBufferUsage_Storage;
+        }
+        if (bufferUsage & SDL_GPU_BUFFERUSAGE_COMPUTE_STORAGE_WRITE) {
+            usage |= WGPUBufferUsage_Storage;
+        }
+        if (isWriteOnly) {
+            SDL_LogWarn(SDL_LOG_CATEGORY_GPU,
+                       "isWriteOnly ignored for private GPU buffer %s",
+                       debugName ? debugName : "unnamed");
+        }
+    }
 
     container->size = size;
     container->bufferCapacity = 1;
     container->bufferCount = 1;
     container->buffers = SDL_calloc(container->bufferCapacity, sizeof(WebGPUBuffer *));
-    container->isPrivate = isPrivate;
-    container->isWriteOnly = isWriteOnly;
-    container->debugName = NULL;
-    if (debugName) {
-        container->debugName = SDL_strdup(debugName);
-    }
-    if (isPrivate) {
-    } else {
-        if (isWriteOnly) {
-            usage |= WGPUBufferUsage_Uniform;
-        } else {
-            usage |= WGPUBufferUsage_Storage;
-        }
+    if (!container->buffers) {
+        SDL_free(container);
+        SDL_LogError(SDL_LOG_CATEGORY_GPU, "Failed to allocate buffer array");
+        return NULL;
     }
 
-    container->buffers[0] = WebGPU_INTERNAL_CreateBuffer(
-        renderer,
-        size,
-        usage,
-        debugName);
+    container->isPrivate = isPrivate;
+    container->isWriteOnly = isWriteOnly;
+    container->debugName = debugName ? SDL_strdup(debugName) : NULL;
+
+    container->buffers[0] = WebGPU_INTERNAL_CreateBuffer(renderer, size, usage, debugName);
+    if (!container->buffers[0]) {
+        SDL_free(container->buffers);
+        if (container->debugName) {
+            SDL_free(container->debugName);
+        }
+        SDL_free(container);
+        SDL_LogError(SDL_LOG_CATEGORY_GPU, "Failed to create buffer");
+        return NULL;
+    }
 
     container->activeBuffer = container->buffers[0];
 
+    if (renderer->debugMode) {
+        SDL_Log("WebGPU: Created buffer container %p with size=%u, usage=0x%x, debugName=%s",
+                container, size, usage, debugName ? debugName : "unnamed");
+    }
+
     return container;
+}
+
+// This function assumes that it's called from within an autorelease pool
+static WebGPUBuffer *WebGPU_INTERNAL_PrepareBufferForWrite(
+    WebGPURenderer *renderer,
+    WebGPUBufferContainer *container,
+    bool cycle)
+{
+    // Cycle if needed
+    if (cycle && SDL_GetAtomicInt(&container->activeBuffer->refCount) > 0) {
+        for (Uint32 i = 0; i < container->bufferCount; i++) {
+            if (SDL_GetAtomicInt(&container->buffers[i]->refCount) == 0) {
+                // Ensure the buffer is mapped
+                if (!container->buffers[i]->isMapped) {
+                    MapCallbackData *callbackData = SDL_calloc(1, sizeof(MapCallbackData));
+                    callbackData->buffer = container->buffers[i];
+                    SDL_SetAtomicInt(&callbackData->mapped, 0);
+
+                    wgpuBufferMapAsync(
+                        container->buffers[i]->handle,
+                        WGPUMapMode_Write,
+                        0,
+                        container->size,
+                        MapCallback,
+                        callbackData);
+
+                    // Block until mapped (not ideal, but matches SDL sync expectation)
+                    while (SDL_GetAtomicInt(&callbackData->mapped) == 0) {
+                        SDL_Delay(1); // Hand over control to the browser for a bit
+                        // Should return unless browser throws an error
+                    }
+                    if (SDL_GetAtomicInt(&callbackData->mapped) < 0) {
+                        SDL_LogError(SDL_LOG_CATEGORY_GPU, "Failed to remap buffer");
+                        return NULL;
+                    }
+                }
+                container->activeBuffer = container->buffers[i];
+                return container->activeBuffer;
+            }
+        }
+
+        // No available buffer, create a new one
+        EXPAND_ARRAY_IF_NEEDED(
+            container->buffers,
+            WebGPUBuffer *,
+            container->bufferCount + 1,
+            container->bufferCapacity,
+            container->bufferCapacity + 1);
+
+        WGPUBufferUsage usage = WGPUBufferUsage_MapWrite;
+        if (container->isPrivate) {
+            usage = WGPUBufferUsage_Storage; // No mapping for private buffers
+        } else if (!container->isWriteOnly) {
+            usage |= WGPUBufferUsage_MapRead; // Add read if not write-only
+        }
+
+        container->buffers[container->bufferCount] = WebGPU_INTERNAL_CreateBuffer(
+            renderer,
+            container->size,
+            usage,
+            container->debugName);
+        container->bufferCount += 1;
+        container->activeBuffer = container->buffers[container->bufferCount - 1];
+    }
+
+    // Ensure the active buffer is mapped if not private
+    if (!container->isPrivate && !container->activeBuffer->isMapped) {
+        MapCallbackData *callbackData = SDL_calloc(1, sizeof(MapCallbackData));
+        callbackData->buffer = container->activeBuffer;
+        callbackData->mapped.value = 0;
+
+        wgpuBufferMapAsync(
+            container->activeBuffer->handle,
+            WGPUMapMode_Write,
+            0,
+            container->size,
+            MapCallback,
+            callbackData);
+
+        while (SDL_GetAtomicInt(&callbackData->mapped) == 0) {
+            SDL_Delay(1); // Hand over control to the browser for a bit
+            // Should return unless browser throws an error
+        }
+        if (SDL_GetAtomicInt(&callbackData->mapped) < 0) {
+            SDL_LogError(SDL_LOG_CATEGORY_GPU, "Failed to map active buffer");
+            return NULL;
+        }
+    }
+
+    return container->activeBuffer;
 }
 
 static SDL_GPUBuffer *WebGPU_CreateBuffer(
@@ -1725,16 +1913,15 @@ static SDL_GPUBuffer *WebGPU_CreateBuffer(
     Uint32 size,
     const char *debugName)
 {
-    AUTORELEASE_POOL();
-
     WebGPURenderer *renderer = (WebGPURenderer *)driverData;
     WebGPUBufferContainer *container;
 
     container = WebGPU_INTERNAL_CreateBufferContainer(
         renderer,
         size,
+        true,
         false,
-        false,
+        usage,
         debugName);
 
     return (SDL_GPUBuffer *)container;
@@ -1762,6 +1949,292 @@ static void WebGPU_ReleaseBuffer(
     SDL_UnlockMutex(renderer->disposeLock);
 }
 
+static SDL_GPUTransferBuffer *WebGPU_CreateTransferBuffer(
+    SDL_GPURenderer *driverData,
+    SDL_GPUTransferBufferUsage usage,
+    Uint32 size,
+    const char *debugName)
+{
+    WebGPURenderer *renderer = (WebGPURenderer *)driverData;
+    WebGPUBufferContainer *container;
+
+    container = WebGPU_INTERNAL_CreateBufferContainer(
+        renderer,
+        size,
+        false,
+        usage == SDL_GPU_TRANSFERBUFFERUSAGE_UPLOAD,
+        0,
+        debugName);
+
+    return (SDL_GPUTransferBuffer *)container;
+}
+
+static void WebGPU_ReleaseTransferBuffer(
+    SDL_GPURenderer *driverData,
+    SDL_GPUTransferBuffer *transferBuffer)
+{
+    WebGPU_ReleaseBuffer(
+        driverData,
+        (SDL_GPUBuffer *)transferBuffer);
+}
+
+static void *WebGPU_MapTransferBuffer(
+    SDL_GPURenderer *driverData,
+    SDL_GPUTransferBuffer *transferBuffer,
+    bool cycle)
+{
+    WebGPURenderer *renderer = (WebGPURenderer *)driverData;
+    WebGPUBufferContainer *container = (WebGPUBufferContainer *)transferBuffer;
+    WebGPUBuffer *buffer = WebGPU_INTERNAL_PrepareBufferForWrite(renderer, container, cycle);
+
+    if (!buffer || !buffer->handle) {
+        SDL_LogError(SDL_LOG_CATEGORY_GPU, "Transfer buffer not ready");
+        return NULL;
+    }
+
+    if (!buffer->isMapped) {
+        MapCallbackData *callbackData = SDL_calloc(1, sizeof(MapCallbackData));
+        callbackData->buffer = buffer;
+        SDL_SetAtomicInt(&callbackData->mapped, 0);
+
+        wgpuBufferMapAsync(
+            buffer->handle,
+            WGPUMapMode_Write,
+            0,
+            container->size,
+            MapCallback,
+            callbackData
+        );
+
+        while (SDL_GetAtomicInt(&callbackData->mapped) == 0) {
+            SDL_Delay(1); // Hand over control to the browser for a bit
+        }
+        if (SDL_GetAtomicInt(&callbackData->mapped) < 0) {
+            SDL_LogError(SDL_LOG_CATEGORY_GPU, "Failed to map transfer buffer");
+            return NULL;
+        }
+    }
+
+    SDL_AtomicIncRef(&buffer->refCount);
+    SDL_Log("WebGPU: Mapped transfer buffer %p, refCount=%d", buffer, SDL_GetAtomicInt(&buffer->refCount));
+    return buffer->mappedData;
+}
+
+static void WebGPU_UnmapTransferBuffer(
+    SDL_GPURenderer *driverData,
+    SDL_GPUTransferBuffer *transferBuffer)
+{
+    if (!driverData || !transferBuffer) {
+        SDL_LogError(SDL_LOG_CATEGORY_GPU, "Invalid renderer or transfer buffer in UnmapTransferBuffer");
+        return;
+    }
+
+    WebGPUBufferContainer *container = (WebGPUBufferContainer *)transferBuffer;
+    if (!container->activeBuffer) {
+        SDL_LogWarn(SDL_LOG_CATEGORY_GPU, "No active buffer to unmap");
+        return;
+    }
+
+    WebGPUBuffer *buffer = container->activeBuffer;
+    int refCount = SDL_GetAtomicInt(&buffer->refCount);
+    SDL_Log("WebGPU: Unmapping buffer %p, refCount=%d, isMapped=%d", buffer, refCount, buffer->isMapped);
+
+    if (refCount <= 0) {
+        SDL_LogWarn(SDL_LOG_CATEGORY_GPU, "Buffer %p already unreferenced", buffer);
+        return;
+    }
+
+    if (buffer->isMapped) {
+        SDL_assert(buffer->handle != NULL);
+        if (SDL_AtomicDecRef(&buffer->refCount)) {
+            wgpuBufferUnmap(buffer->handle);
+            buffer->isMapped = false;
+            buffer->mappedData = NULL;
+            SDL_Log("WebGPU: Successfully unmapped buffer %p", buffer);
+        } else {
+            SDL_Log("WebGPU: Buffer %p still referenced, refCount=%d", buffer, SDL_GetAtomicInt(&buffer->refCount));
+        }
+    } else {
+        SDL_AtomicDecRef(&buffer->refCount); // Decrement even if not mapped
+        SDL_Log("WebGPU: Buffer %p not mapped, refCount decremented to %d", buffer, SDL_GetAtomicInt(&buffer->refCount));
+    }
+}
+
+static void WebGPU_BeginCopyPass(
+    SDL_GPUCommandBuffer *commandBuffer)
+{
+    AUTORELEASE_POOL();
+    WebGPUCommandBuffer *webgpuCommandBuffer = (WebGPUCommandBuffer *)commandBuffer;
+    WGPUCommandEncoderDescriptor commandEncoderDesc = {
+        .label = "SDL_GPU WebGPU Command Encoder",
+    };
+    webgpuCommandBuffer->handle = wgpuDeviceCreateCommandEncoder(webgpuCommandBuffer->renderer->device, &commandEncoderDesc);
+}
+
+static void WebGPU_EndCopyPass(SDL_GPUCommandBuffer *commandBuffer)
+{
+    (void)commandBuffer;
+    // No need to do anything here, everything is handled in Submit for WGPU
+}
+
+static void WebGPU_UploadToBuffer(SDL_GPUCommandBuffer *commandBuffer,
+                                  const SDL_GPUTransferBufferLocation *source,
+                                  const SDL_GPUBufferRegion *destination,
+                                  bool cycle)
+{
+    WebGPUCommandBuffer *webgpuCmd = (WebGPUCommandBuffer *)commandBuffer;
+    WebGPURenderer *renderer = webgpuCmd->renderer;
+    WebGPUBufferContainer *transferContainer = (WebGPUBufferContainer *)source->transfer_buffer;
+    WebGPUBufferContainer *bufferContainer = (WebGPUBufferContainer *)destination->buffer;
+
+    WebGPUBuffer *dstBuffer = WebGPU_INTERNAL_PrepareBufferForWrite(renderer, bufferContainer, cycle);
+    if (!dstBuffer || !dstBuffer->handle) {
+        SDL_LogError(SDL_LOG_CATEGORY_GPU, "Failed to prepare destination buffer for upload");
+        return;
+    }
+
+    WebGPUBuffer *srcBuffer = transferContainer->activeBuffer;
+    if (!srcBuffer || !srcBuffer->handle) {
+        SDL_LogError(SDL_LOG_CATEGORY_GPU, "Invalid source transfer buffer");
+        return;
+    }
+
+    if (srcBuffer->isMapped) {
+        SDL_LogError(SDL_LOG_CATEGORY_GPU,
+                    "Transfer buffer %p is mapped during upload; unmap before submission",
+                    srcBuffer);
+    }
+
+    if (!webgpuCmd->copyEncoder) {
+        webgpuCmd->copyEncoder = wgpuDeviceCreateCommandEncoder(webgpuCmd->renderer->device, NULL);
+        if (!webgpuCmd->copyEncoder) {
+            SDL_LogError(SDL_LOG_CATEGORY_GPU, "Failed to create copy encoder");
+            return;
+        }
+    }
+
+    wgpuCommandEncoderCopyBufferToBuffer(
+        webgpuCmd->copyEncoder,
+        srcBuffer->handle,
+        source->offset,
+        dstBuffer->handle,
+        destination->offset,
+        destination->size
+    );
+
+    WebGPU_INTERNAL_TrackBuffer(webgpuCmd, srcBuffer);
+    WebGPU_INTERNAL_TrackBuffer(webgpuCmd, dstBuffer);
+}
+
+static void WebGPU_CopyBufferToBuffer(SDL_GPUCommandBuffer *commandBuffer,
+                                      const SDL_GPUBufferLocation *source,
+                                      const SDL_GPUBufferLocation *destination,
+                                      Uint32 size,
+                                      bool cycle)
+{
+    WebGPUCommandBuffer *webgpuCommandBuffer = (WebGPUCommandBuffer *)commandBuffer;
+    WebGPURenderer *renderer = webgpuCommandBuffer->renderer;
+    WebGPUBufferContainer *srcContainer = (WebGPUBufferContainer *)source->buffer;
+    WebGPUBufferContainer *dstContainer = (WebGPUBufferContainer *)destination->buffer;
+
+    WebGPUBuffer *srcBuffer = srcContainer->activeBuffer;
+    if (!srcBuffer || !srcBuffer->handle) {
+        SDL_LogError(SDL_LOG_CATEGORY_GPU, "Invalid source buffer for copy");
+        return;
+    }
+
+    WebGPUBuffer *dstBuffer = WebGPU_INTERNAL_PrepareBufferForWrite(renderer, dstContainer, cycle);
+    if (!dstBuffer || !dstBuffer->handle) {
+        SDL_LogError(SDL_LOG_CATEGORY_GPU, "Failed to prepare destination buffer for copy");
+        return;
+    }
+
+    // Ensure copy encoder exists
+    if (!webgpuCommandBuffer->copyEncoder) {
+        webgpuCommandBuffer->copyEncoder = wgpuDeviceCreateCommandEncoder(webgpuCommandBuffer->renderer->device, NULL);
+        if (!webgpuCommandBuffer->copyEncoder) {
+            SDL_LogError(SDL_LOG_CATEGORY_GPU, "Failed to create copy encoder");
+            return;
+        }
+    }
+
+    wgpuCommandEncoderCopyBufferToBuffer(
+        webgpuCommandBuffer->copyEncoder,
+        srcBuffer->handle,
+        source->offset,
+        dstBuffer->handle,
+        destination->offset,
+        size);
+
+    WebGPU_INTERNAL_TrackBuffer(webgpuCommandBuffer, srcBuffer);
+    WebGPU_INTERNAL_TrackBuffer(webgpuCommandBuffer, dstBuffer);
+}
+
+static void WebGPU_DownloadFromBuffer(
+    SDL_GPUCommandBuffer *commandBuffer,
+    const SDL_GPUBufferRegion *source,
+    const SDL_GPUTransferBufferLocation *destination)
+{
+    SDL_GPUBufferLocation srcLocation = {
+        .buffer = source->buffer,
+        .offset = source->offset
+    };
+
+    SDL_GPUBufferLocation dstLocation = {
+        .buffer = (SDL_GPUBuffer *)destination->transfer_buffer,
+        .offset = destination->offset
+    };
+
+    WebGPU_CopyBufferToBuffer(
+        commandBuffer,
+        &srcLocation,
+        &dstLocation,
+        source->size,
+        false // No cycling for downloads
+    );
+}
+
+static void WebGPU_BindVertexBuffers(
+    SDL_GPUCommandBuffer *commandBuffer,
+    Uint32 firstSlot,
+    const SDL_GPUBufferBinding *bindings,
+    Uint32 numBindings)
+{
+    WebGPUCommandBuffer *webgpuCommandBuffer = (WebGPUCommandBuffer *)commandBuffer;
+    if (!webgpuCommandBuffer->renderEncoder) {
+        SDL_LogWarn(SDL_LOG_CATEGORY_GPU, "No active render encoder for binding vertex buffers");
+        return;
+    }
+
+    if (numBindings == 0) {
+        return;
+    }
+
+    if (firstSlot + numBindings > MAX_VERTEX_BUFFERS) {
+        SDL_LogError(SDL_LOG_CATEGORY_GPU, "Vertex buffer binding exceeds max slots: %u + %u > %u",
+                     firstSlot, numBindings, MAX_VERTEX_BUFFERS);
+        return;
+    }
+
+    for (Uint32 i = 0; i < numBindings; i++) {
+        WebGPUBuffer *buffer = ((WebGPUBufferContainer *)bindings[i].buffer)->activeBuffer;
+        if (!buffer || !buffer->handle) {
+            SDL_LogError(SDL_LOG_CATEGORY_GPU, "Invalid buffer at binding slot %u", firstSlot + i);
+            continue;
+        }
+
+        wgpuRenderPassEncoderSetVertexBuffer(
+            webgpuCommandBuffer->renderEncoder,
+            firstSlot + i,                                         // slot
+            buffer->handle,                                        // buffer
+            bindings[i].offset,                                    // offset
+            wgpuBufferGetSize(buffer->handle) - bindings[i].offset // size (remaining)
+        );
+
+        WebGPU_INTERNAL_TrackBuffer(webgpuCommandBuffer, buffer);
+    }
+}
+
 // This function assumes that it's called from within an autorelease pool
 static WebGPUUniformBuffer *WebGPU_INTERNAL_CreateUniformBuffer(WebGPURenderer *renderer,
                                                                 Uint32 size)
@@ -1772,6 +2245,7 @@ static WebGPUUniformBuffer *WebGPU_INTERNAL_CreateUniformBuffer(WebGPURenderer *
                                                                          .size = size,
                                                                          .usage = usage,
                                                                          .mappedAtCreation = false,
+                                                                         .label = "SDL_GPU WebGPU Uniform Buffer",
                                                                      });
     uniformBuffer->drawOffset = 0;
     uniformBuffer->writeOffset = 0;
@@ -3588,6 +4062,21 @@ static bool WebGPU_Submit(
         return false;
     }
 
+    for (Uint32 i = 0; i < webgpuCommandBuffer->usedBufferCount; i++) {
+        WebGPUBuffer *buffer = webgpuCommandBuffer->usedBuffers[i];
+        if (buffer->isMapped) {
+            SDL_LogError(SDL_LOG_CATEGORY_GPU, "Buffer %p still mapped during submit", buffer);
+        }
+    }
+
+    if (webgpuCommandBuffer->copyEncoder) {
+        WGPUCommandBuffer copyCmd = wgpuCommandEncoderFinish(webgpuCommandBuffer->copyEncoder, NULL);
+        wgpuQueueSubmit(webgpuCommandBuffer->renderer->queue, 1, &copyCmd);
+        wgpuCommandBufferRelease(copyCmd);
+        wgpuCommandEncoderRelease(webgpuCommandBuffer->copyEncoder);
+        webgpuCommandBuffer->copyEncoder = NULL;
+    }
+
     // Enqueue present requests, if applicable
     for (Uint32 i = 0; i < webgpuCommandBuffer->windowDataCount; i += 1) {
         WebGPUWindowData *windowData = webgpuCommandBuffer->windowDatas[i];
@@ -3660,7 +4149,6 @@ static void WebGPU_DestroyDevice(SDL_GPUDevice *device)
         WebGPU_ReleaseWindow(device->driverData, renderer->claimedWindows[i]->window);
     }
     SDL_free(renderer->claimedWindows);
-
 
     // TODO: Release Blit resources
     // WebGPU_INTERNAL_DestroyBlitResources(renderer);
@@ -3813,8 +4301,23 @@ static SDL_GPUDevice *WebGPU_CreateDevice(bool debug, bool preferLowPower, SDL_P
     result->BeginRenderPass = WebGPU_BeginRenderPass;
     result->EndRenderPass = WebGPU_EndRenderPass;
     result->Submit = WebGPU_Submit;
+
     result->CreateBuffer = WebGPU_CreateBuffer;
     result->ReleaseBuffer = WebGPU_ReleaseBuffer;
+    result->CreateTransferBuffer = WebGPU_CreateTransferBuffer;
+    result->ReleaseTransferBuffer = WebGPU_ReleaseTransferBuffer;
+    result->CreateTransferBuffer = WebGPU_CreateTransferBuffer;
+    result->MapTransferBuffer = WebGPU_MapTransferBuffer;
+    result->ReleaseTransferBuffer = WebGPU_ReleaseTransferBuffer;
+    result->UnmapTransferBuffer = WebGPU_UnmapTransferBuffer;
+
+    result->BeginCopyPass = WebGPU_BeginCopyPass;
+    result->EndCopyPass = WebGPU_EndCopyPass;
+    result->UploadToBuffer = WebGPU_UploadToBuffer;
+    result->DownloadFromBuffer = WebGPU_DownloadFromBuffer;
+    result->CopyBufferToBuffer = WebGPU_CopyBufferToBuffer;
+    result->BindVertexBuffers = WebGPU_BindVertexBuffers;
+
     result->CreateTexture = WebGPU_CreateTexture;
     result->CreateShader = WebGPU_CreateShader;
     result->ReleaseShader = WebGPU_ReleaseShader;
