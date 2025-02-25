@@ -1791,6 +1791,28 @@ static void WebGPU_ReleaseFence(
     }
 }
 
+static void WebGPU_ReleaseTexture(
+    SDL_GPURenderer *driverData,
+    SDL_GPUTexture *texture)
+{
+    // WebGPURenderer *renderer = (WebGPURenderer *)driverData;
+    // WebGPUTextureContainer *container = (WebGPUTextureContainer *)texture;
+
+    // SDL_LockMutex(renderer->disposeLock);
+
+    // EXPAND_ARRAY_IF_NEEDED(
+    //     renderer->textureContainersToDestroy,
+    //     WebGPUTextureContainer *,
+    //     renderer->textureContainersToDestroyCount + 1,
+    //     renderer->textureContainersToDestroyCapacity,
+    //     renderer->textureContainersToDestroyCapacity + 1);
+
+    // renderer->textureContainersToDestroy[renderer->textureContainersToDestroyCount] = container;
+    // renderer->textureContainersToDestroyCount += 1;
+
+    // SDL_UnlockMutex(renderer->disposeLock);
+}
+
 static WebGPUBuffer *WebGPU_INTERNAL_CreateBuffer(
     WebGPURenderer *renderer,
     Uint32 size,
@@ -3109,7 +3131,6 @@ static void WebGPU_DrawPrimitives(
 {
     AUTORELEASE_POOL();
     WebGPUCommandBuffer *webgpuCommandBuffer = (WebGPUCommandBuffer *)commandBuffer;
-    WebGPUGraphicsPipeline *graphicsPipeline = webgpuCommandBuffer->graphicsPipeline;
 
     DebugFrameObjects(webgpuCommandBuffer);
 
@@ -3382,12 +3403,7 @@ static bool WebGPU_INTERNAL_CreateSwapchain(
 
     windowData->textureContainer.header.info.width = (Uint32)windowData->window->w;
     windowData->textureContainer.header.info.height = (Uint32)windowData->window->h;
-    /*SDL_Log("WebGPU: Created swapchain surface");*/
-
-    /*if (oldTexture) {*/
-    /*    wgpuTextureRelease(oldTexture);*/
-    /*}*/
-
+    
     SDL_UnlockMutex(renderer->windowLock);
 
     return windowData->surface != NULL;
@@ -4446,6 +4462,7 @@ static SDL_GPUDevice *WebGPU_CreateDevice(bool debug, bool preferLowPower, SDL_P
     result->BindIndexBuffer = WebGPU_BindIndexBuffer;
 
     result->CreateTexture = WebGPU_CreateTexture;
+    result->ReleaseTexture = WebGPU_ReleaseTexture;
     result->CreateShader = WebGPU_CreateShader;
     result->ReleaseShader = WebGPU_ReleaseShader;
     result->CreateGraphicsPipeline = WebGPU_CreateGraphicsPipeline;
