@@ -223,7 +223,7 @@ static void WebGPU_INTERNAL_RecreateSwapchain(WebGPURenderer *renderer, WebGPUWi
 typedef struct WebGPUFence
 {
     SDL_AtomicInt complete;
-    SDL_AtomicInt refenceCount;
+    SDL_AtomicInt referenceCount;
 } WebGPUFence;
 
 typedef struct WebGPUTexture
@@ -1504,7 +1504,7 @@ static bool WebGPU_INTERNAL_CreateFence(
 {
     WebGPUFence *fence = SDL_calloc(1, sizeof(WebGPUFence));
     SDL_SetAtomicInt(&fence->complete, 0);
-    SDL_AtomicIncRef(&fence->refenceCount);
+    SDL_AtomicIncRef(&fence->referenceCount);
 
     EXPAND_ARRAY_IF_NEEDED(
         renderer->availableFences,
@@ -1543,7 +1543,7 @@ static bool WebGPU_INTERNAL_AcquireFence(
     // Associate the fence with the command buffer
     commandBuffer->fence = fence;
     SDL_SetAtomicInt(&fence->complete, 0); // Reset the fence
-    (void)SDL_AtomicIncRef(&fence->refenceCount);
+    (void)SDL_AtomicIncRef(&fence->referenceCount);
 
     return true;
 }
@@ -1551,7 +1551,7 @@ static bool WebGPU_INTERNAL_AcquireFence(
 static void WebGPU_INTERNAL_FenceCallback(WGPUQueueWorkDoneStatus status, void *userdata)
 {
     WebGPUCommandBuffer *webgpuCommandBuffer = (WebGPUCommandBuffer *)userdata;
-    SDL_AtomicIncRef(&webgpuCommandBuffer->fence->complete);
+    SDL_SetAtomicInt(&webgpuCommandBuffer->fence->complete, 1);
 }
 
 // Assumes that it's called from within an autorelease pool
@@ -1737,7 +1737,7 @@ static void WebGPU_ReleaseFence(
     SDL_GPUFence *fence)
 {
     WebGPUFence *webgpuFence = (WebGPUFence *)fence;
-    if (SDL_AtomicDecRef(&webgpuFence->refenceCount)) {
+    if (SDL_AtomicDecRef(&webgpuFence->referenceCount)) {
         WebGPU_INTERNAL_ReleaseFenceToPool(
             (WebGPURenderer *)driverData,
             webgpuFence);
@@ -2113,10 +2113,10 @@ static void WebGPU_DownloadFromBuffer(
 
     // Update lastFence for download synchronization
     if (dstContainer->lastFence) {
-        SDL_AtomicDecRef(&dstContainer->lastFence->refenceCount);
+        SDL_AtomicDecRef(&dstContainer->lastFence->referenceCount);
     }
     dstContainer->lastFence = webgpuCommandBuffer->fence;
-    SDL_AtomicIncRef(&dstContainer->lastFence->refenceCount);
+    SDL_AtomicIncRef(&dstContainer->lastFence->referenceCount);
 }
 
 static void WebGPU_BindVertexBuffers(
@@ -4020,7 +4020,7 @@ static bool WebGPU_Submit(
 
         windowData->inFlightFences[windowData->frameCounter] = (SDL_GPUFence *)webgpuCommandBuffer->fence;
 
-        (void)SDL_AtomicIncRef(&webgpuCommandBuffer->fence->refenceCount);
+        (void)SDL_AtomicIncRef(&webgpuCommandBuffer->fence->referenceCount);
 
         windowData->frameCounter = (windowData->frameCounter + 1) % renderer->allowedFramesInFlight;
     }
