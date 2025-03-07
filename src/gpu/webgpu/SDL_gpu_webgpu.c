@@ -36,7 +36,7 @@
 
 // TODO: REMOVE
 // Code compiles without these but my LSP freaks out without them
-// #include "../../../wgpu/include/webgpu/wgpu.h"
+#include "../../../wgpu/include/webgpu/wgpu.h"
 #include <SDL3/SDL_atomic.h>
 #include <SDL3/SDL_gpu.h>
 #include <SDL3/SDL_mutex.h>
@@ -300,24 +300,24 @@ struct WebGPUCommandBuffer
     bool needFragmentUniformBind;
 
     bool needComputeSamplerBind;
-    bool needComputeTextureBind;
-    bool needComputeBufferBind;
+    bool needComputeReadOnlyStorageTextureBind;
+    bool needComputeReadOnlyStorageBufferBind;
     bool needComputeUniformBind;
 
-    WGPUSampler vertexSamplers[MAX_TEXTURE_SAMPLERS_PER_STAGE];
     WGPUTexture vertexTextures[MAX_TEXTURE_SAMPLERS_PER_STAGE];
+    WGPUSampler vertexSamplers[MAX_TEXTURE_SAMPLERS_PER_STAGE];
     WGPUTexture vertexStorageTextures[MAX_STORAGE_TEXTURES_PER_STAGE];
     WGPUBuffer vertexStorageBuffers[MAX_STORAGE_BUFFERS_PER_STAGE];
 
-    WGPUSampler fragmentSamplers[MAX_TEXTURE_SAMPLERS_PER_STAGE];
     WGPUTexture fragmentTextures[MAX_TEXTURE_SAMPLERS_PER_STAGE];
+    WGPUSampler fragmentSamplers[MAX_TEXTURE_SAMPLERS_PER_STAGE];
     WGPUTexture fragmentStorageTextures[MAX_STORAGE_TEXTURES_PER_STAGE];
     WGPUBuffer fragmentStorageBuffers[MAX_STORAGE_BUFFERS_PER_STAGE];
 
     WGPUTexture computeSamplerTextures[MAX_TEXTURE_SAMPLERS_PER_STAGE];
     WGPUSampler computeSamplers[MAX_TEXTURE_SAMPLERS_PER_STAGE];
-    WGPUTexture computeReadOnlyTextures[MAX_TEXTURE_SAMPLERS_PER_STAGE];
-    WGPUBuffer computeReadOnlyBuffers[MAX_STORAGE_BUFFERS_PER_STAGE];
+    WGPUTexture computeReadOnlyStorageTextures[MAX_TEXTURE_SAMPLERS_PER_STAGE];
+    WGPUBuffer computeReadOnlyStorageBuffers[MAX_STORAGE_BUFFERS_PER_STAGE];
     WGPUTexture computeReadWriteTextures[MAX_COMPUTE_WRITE_TEXTURES];
     WGPUBuffer computeReadWriteBuffers[MAX_COMPUTE_WRITE_BUFFERS];
 
@@ -447,8 +447,8 @@ static void DebugFrameObjects(WebGPUCommandBuffer *cmdBuffer)
     void *currentBindGroup = cmdBuffer->graphicsPipeline ? cmdBuffer->graphicsPipeline->bindGroup : NULL;
 
     SDL_LogDebug(SDL_LOG_CATEGORY_GPU, "Frame objects: Pipeline=%p (same=%d), BindGroup=%p (same=%d)",
-                currentPipeline, currentPipeline == lastPipeline,
-                currentBindGroup, currentBindGroup == lastBindGroup);
+                 currentPipeline, currentPipeline == lastPipeline,
+                 currentBindGroup, currentBindGroup == lastBindGroup);
 
     lastPipeline = currentPipeline;
     lastBindGroup = currentBindGroup;
@@ -531,7 +531,7 @@ static WGPUBufferUsage SDLToWGPUBufferUsageFlags(SDL_GPUBufferUsageFlags usageFl
         wgpuFlags |= WGPUBufferUsage_Index | WGPUBufferUsage_CopyDst;
     }
     if (usageFlags & SDL_GPU_BUFFERUSAGE_INDIRECT) {
-        wgpuFlags |= WGPUBufferUsage_Indirect;
+        wgpuFlags |= WGPUBufferUsage_Indirect | WGPUBufferUsage_CopyDst;
     }
     return wgpuFlags;
 }
@@ -1603,6 +1603,7 @@ static void trim(char *str)
 // Helper function to map WGSL format strings to WGPUTextureFormat
 static WGPUTextureFormat MapFormat(const char *format)
 {
+    SDL_Log("Format: %s", format);
     if (SDL_strcmp(format, "r32float") == 0)
         return WGPUTextureFormat_R32Float;
     if (SDL_strcmp(format, "rg32float") == 0)
@@ -1735,7 +1736,7 @@ static void WebGPU_INTERNAL_ParseBGL(
                 bgl->storageAccess[countStorageTextureViewDimension] = MapAccess(access);
                 bgl->storageDimensions[countStorageTextureViewDimension] = WGPUTextureViewDimension_2D;
                 countStorageTextureViewDimension++;
-                SDL_Log("texture storage 2d: %s, format: %s, access: %s", token, format, access);
+                SDL_Log("texture storage 2d: %s, format: %u, access: %s", token, bgl->storageFormats[countStorageTextureViewDimension - 1], access);
             }
         } else if ((storage_pos = SDL_strstr(token, "texture_storage_2d_array<"))) {
             char format[32];
@@ -2470,6 +2471,56 @@ static void WebGPU_BindFragmentSamplers(
     }
 }
 
+static void WebGPU_BindFragmentStorageTextures(
+    SDL_GPUCommandBuffer *commandBuffer,
+    Uint32 firstSlot,
+    SDL_GPUTexture *const *storageTextures,
+    Uint32 numBindings)
+{
+    WebGPUCommandBuffer *cmdBuf = (WebGPUCommandBuffer *)commandBuffer;
+    WebGPUTextureContainer *texContainer;
+
+    for (Uint32 i = 0; i < numBindings; i += 1) {
+        texContainer = (WebGPUTextureContainer *)storageTextures[i];
+
+        if (cmdBuf->fragmentStorageTextures[firstSlot + i] != texContainer->activeTexture->handle) {
+            WebGPU_INTERNAL_TrackTexture(
+                cmdBuf,
+                texContainer->activeTexture);
+
+            cmdBuf->fragmentStorageTextures[firstSlot + i] =
+                texContainer->activeTexture->handle;
+
+            cmdBuf->needFragmentStorageTextureBind = true;
+        }
+    }
+}
+
+static void WebGPU_BindFragmentStorageBuffers(
+    SDL_GPUCommandBuffer *commandBuffer,
+    Uint32 firstSlot,
+    SDL_GPUBuffer *const *storageBuffers,
+    Uint32 numBindings)
+{
+    WebGPUCommandBuffer *cmdBuf = (WebGPUCommandBuffer *)commandBuffer;
+    WebGPUBufferContainer *bufContainer;
+
+    for (Uint32 i = 0; i < numBindings; i += 1) {
+        bufContainer = (WebGPUBufferContainer *)storageBuffers[i];
+
+        if (cmdBuf->fragmentStorageBuffers[firstSlot + i] != bufContainer->activeBuffer->handle) {
+            WebGPU_INTERNAL_TrackBuffer(
+                cmdBuf,
+                bufContainer->activeBuffer);
+
+            cmdBuf->fragmentStorageBuffers[firstSlot + i] =
+                bufContainer->activeBuffer->handle;
+
+            cmdBuf->needFragmentStorageBufferBind = true;
+        }
+    }
+}
+
 static WebGPUUniformBuffer *WebGPU_INTERNAL_CreateUniformBuffer(WebGPURenderer *renderer,
                                                                 Uint32 size)
 {
@@ -2528,7 +2579,6 @@ static WebGPUTexture *WebGPU_INTERNAL_CreateTexture(
     if (createInfo->format == SDL_GPU_TEXTUREFORMAT_B4G4R4A4_UNORM) {
         SET_STRING_ERROR_AND_RETURN("SDL_GPU_TEXTUREFORMAT_B4G4R4A4_UNORM is not supported", NULL);
     }
-
     desc.viewFormatCount = 1;
     desc.viewFormats = &desc.format;
     desc.nextInChain = NULL;
@@ -3323,12 +3373,14 @@ static SDL_GPUComputePipeline *WebGPU_CreateComputePipeline(
             bg0Entries[bindingIndex].storageTexture.access = WGPUStorageTextureAccess_ReadOnly;
             bg0Entries[bindingIndex].storageTexture.format = pipelineBGL->storageFormats[i];
             bg0Entries[bindingIndex].storageTexture.viewDimension = pipelineBGL->storageDimensions[i];
+            bindingIndex++;
         }
 
         for (i = 0; i < pipeline->numReadonlyStorageBuffers; i++) {
             bg0Entries[bindingIndex].binding = bindingIndex;
             bg0Entries[bindingIndex].visibility = WGPUShaderStage_Compute;
             bg0Entries[bindingIndex].buffer.type = WGPUBufferBindingType_ReadOnlyStorage;
+            bindingIndex++;
         }
 
         // Bind Group 1: Compute - Read-Write Storage Textures, Read-write Storage Buffers
@@ -3339,13 +3391,15 @@ static SDL_GPUComputePipeline *WebGPU_CreateComputePipeline(
             bg1Entries[bindingIndex].binding = bindingIndex;
             bg1Entries[bindingIndex].visibility = WGPUShaderStage_Compute;
             bg1Entries[bindingIndex].storageTexture.access = WGPUStorageTextureAccess_ReadWrite;
-            bg1Entries[bindingIndex].storageTexture.format = pipelineBGL->storageFormats[i];
+            bg1Entries[bindingIndex].storageTexture.format = pipelineBGL->storageFormats[i + readOnlyTotal];
             bg1Entries[bindingIndex].storageTexture.viewDimension = pipelineBGL->storageDimensions[i + readOnlyTotal];
+            bindingIndex++;
         }
         for (i = 0; i < pipeline->numReadWriteStorageBuffers; i++) {
             bg1Entries[bindingIndex].binding = bindingIndex;
             bg1Entries[bindingIndex].visibility = WGPUShaderStage_Compute;
             bg1Entries[bindingIndex].buffer.type = WGPUBufferBindingType_Storage;
+            bindingIndex++;
         }
 
         // Bind Group 2: Compute - Uniform Buffers
@@ -3436,9 +3490,9 @@ static void WebGPU_ReleaseComputePipeline(
     SDL_free(pipeline);
 }
 
-static void WebGPU_INTERNAL_CreateComputeBindGroup(WebGPUCommandBuffer *commandBuffer, WGPUBindGroup *bindgroups)
+static void WebGPU_INTERNAL_CreateComputeBindGroup(WebGPUCommandBuffer *cmdBuf, WGPUBindGroup *bindgroups)
 {
-    WebGPUComputePipeline *pipeline = commandBuffer->computePipeline;
+    WebGPUComputePipeline *pipeline = cmdBuf->computePipeline;
     if (!pipeline) {
         SDL_LogError(SDL_LOG_CATEGORY_GPU, "No compute pipeline active");
     }
@@ -3462,7 +3516,7 @@ static void WebGPU_INTERNAL_CreateComputeBindGroup(WebGPUCommandBuffer *commandB
 
     // Texture Sampler Pairs
     for (i = 0; i < pipeline->numSamplers; i++) {
-        tex = commandBuffer->computeSamplerTextures[i];
+        tex = cmdBuf->computeSamplerTextures[i];
         dim = wgpuTextureGetDimension(tex);
         layerCount = wgpuTextureGetDepthOrArrayLayers(tex);
 
@@ -3488,13 +3542,13 @@ static void WebGPU_INTERNAL_CreateComputeBindGroup(WebGPUCommandBuffer *commandB
         bindingIndex++;
 
         bg0Entries[bindingIndex].binding = bindingIndex;
-        bg0Entries[bindingIndex].sampler = commandBuffer->computeSamplers[i];
+        bg0Entries[bindingIndex].sampler = cmdBuf->computeSamplers[i];
         bindingIndex++;
     }
 
     // Read only storage textures
     for (i = 0; i < pipeline->numReadonlyStorageTextures; i += 1) {
-        tex = commandBuffer->computeReadOnlyTextures[i];
+        tex = cmdBuf->computeReadOnlyStorageTextures[i];
         dim = wgpuTextureGetDimension(tex);
         layerCount = wgpuTextureGetDepthOrArrayLayers(tex);
 
@@ -3506,6 +3560,10 @@ static void WebGPU_INTERNAL_CreateComputeBindGroup(WebGPUCommandBuffer *commandB
             viewDim = WGPUTextureViewDimension_2D;
         } else if (dim == WGPUTextureDimension_3D) {
             viewDim = WGPUTextureViewDimension_3D;
+        }
+
+        if (wgpuTextureGetFormat(tex) != cmdBuf->computePipeline->bgl.storageFormats[i]) {
+            SDL_LogError(SDL_LOG_CATEGORY_GPU, "SDL Texture Read-Only: Format does not match expected entry format!");
         }
 
         bg0Entries[bindingIndex].binding = bindingIndex;
@@ -3522,7 +3580,7 @@ static void WebGPU_INTERNAL_CreateComputeBindGroup(WebGPUCommandBuffer *commandB
 
     // Read only buffers
     for (i = 0; i < pipeline->numReadonlyStorageBuffers; i += 1) {
-        WGPUBuffer buffer = commandBuffer->computeReadOnlyBuffers[i];
+        WGPUBuffer buffer = cmdBuf->computeReadOnlyStorageBuffers[i];
         bg0Entries[bindingIndex].binding = bindingIndex;
         bg0Entries[bindingIndex].buffer = buffer;
         bg0Entries[bindingIndex].size = wgpuBufferGetSize(buffer);
@@ -3531,11 +3589,11 @@ static void WebGPU_INTERNAL_CreateComputeBindGroup(WebGPUCommandBuffer *commandB
 
     // Create bg0 for return bindgroup array
     WGPUBindGroupDescriptor bgDesc0 = {
-        .layout = wgpuComputePipelineGetBindGroupLayout(commandBuffer->computePipeline->handle, 0),
+        .layout = wgpuComputePipelineGetBindGroupLayout(cmdBuf->computePipeline->handle, 0),
         .entryCount = bindGroup0Total,
         .entries = bg0Entries
     };
-    bindgroups[0] = wgpuDeviceCreateBindGroup(commandBuffer->renderer->device, &bgDesc0);
+    bindgroups[0] = wgpuDeviceCreateBindGroup(cmdBuf->renderer->device, &bgDesc0);
 
     // Bind Group 1: Compute - Read-Write Storage Textures, Read-write Storage Buffers
     Uint32 bindGroup1Total = pipeline->numReadWriteStorageTextures + pipeline->numReadWriteStorageBuffers;
@@ -3543,7 +3601,11 @@ static void WebGPU_INTERNAL_CreateComputeBindGroup(WebGPUCommandBuffer *commandB
     bindingIndex = 0;
 
     for (i = 0; i < pipeline->numReadWriteStorageTextures; i++) {
-        tex = commandBuffer->computeReadWriteTextures[i];
+        tex = cmdBuf->computeReadWriteTextures[i];
+
+        if (wgpuTextureGetFormat(tex) != cmdBuf->computePipeline->bgl.storageFormats[i]) {
+            SDL_LogError(SDL_LOG_CATEGORY_GPU, "SDL Texture Read-Write: Format does not match expected entry format!");
+        }
 
         bg1Entries[bindingIndex].binding = bindingIndex;
         bg1Entries[bindingIndex].textureView = wgpuTextureCreateView(
@@ -3559,7 +3621,7 @@ static void WebGPU_INTERNAL_CreateComputeBindGroup(WebGPUCommandBuffer *commandB
         bindingIndex++;
     }
     for (i = 0; i < pipeline->numReadWriteStorageBuffers; i++) {
-        WGPUBuffer buffer = commandBuffer->computeReadWriteBuffers[i];
+        WGPUBuffer buffer = cmdBuf->computeReadWriteBuffers[i];
         bg1Entries[bindingIndex].binding = bindingIndex;
         bg1Entries[bindingIndex].buffer = buffer;
         bg1Entries[bindingIndex].size = wgpuBufferGetSize(buffer);
@@ -3568,18 +3630,18 @@ static void WebGPU_INTERNAL_CreateComputeBindGroup(WebGPUCommandBuffer *commandB
 
     // Create bg 1 for return bindgroup array
     WGPUBindGroupDescriptor bgDesc1 = {
-        .layout = wgpuComputePipelineGetBindGroupLayout(commandBuffer->computePipeline->handle, 1),
+        .layout = wgpuComputePipelineGetBindGroupLayout(cmdBuf->computePipeline->handle, 1),
         .entryCount = bindGroup1Total,
         .entries = bg1Entries
     };
-    bindgroups[1] = wgpuDeviceCreateBindGroup(commandBuffer->renderer->device, &bgDesc1);
+    bindgroups[1] = wgpuDeviceCreateBindGroup(cmdBuf->renderer->device, &bgDesc1);
 
     // Bind Group 2: Compute - Uniform Buffers
     Uint32 bindGroup2Total = pipeline->numUniformBuffers;
     WGPUBindGroupEntry *bg2Entries = SDL_calloc(bindGroup2Total, sizeof(WGPUBindGroupEntry));
     bindingIndex = 0;
     for (i = 0; i < pipeline->numUniformBuffers; i++) {
-        WebGPUUniformBuffer *buffer = commandBuffer->computeUniformBuffers[i];
+        WebGPUUniformBuffer *buffer = cmdBuf->computeUniformBuffers[i];
         bg2Entries[bindingIndex].binding = bindingIndex;
         bg2Entries[bindingIndex].buffer = buffer->buffer;
         bg2Entries[bindingIndex].size = 256,
@@ -3589,11 +3651,11 @@ static void WebGPU_INTERNAL_CreateComputeBindGroup(WebGPUCommandBuffer *commandB
 
     // Create bg2 for return bindgroup array
     WGPUBindGroupDescriptor bgDesc2 = {
-        .layout = wgpuComputePipelineGetBindGroupLayout(commandBuffer->computePipeline->handle, 2),
+        .layout = wgpuComputePipelineGetBindGroupLayout(cmdBuf->computePipeline->handle, 2),
         .entryCount = bindGroup2Total,
         .entries = bg2Entries
     };
-    bindgroups[2] = wgpuDeviceCreateBindGroup(commandBuffer->renderer->device, &bgDesc2);
+    bindgroups[2] = wgpuDeviceCreateBindGroup(cmdBuf->renderer->device, &bgDesc2);
 
     if (!bindgroups[0] || !bindgroups[1] || !bindgroups[2]) {
         SDL_LogError(SDL_LOG_CATEGORY_GPU, "Failed to create compute bind groups");
@@ -4052,6 +4114,55 @@ static void WebGPU_BindComputePipeline(
                  webgpuComputePipeline, cache, cache->resourcesDirty);
 }
 
+static void WebGPU_BindComputeStorageTextures(
+    SDL_GPUCommandBuffer *commandBuffer,
+    Uint32 firstSlot,
+    SDL_GPUTexture *const *storageTextures,
+    Uint32 numBindings)
+{
+    WebGPUCommandBuffer *cmdBuf = (WebGPUCommandBuffer *)commandBuffer;
+    WebGPUTextureContainer *texContainer;
+
+    for (Uint32 i = 0; i < numBindings; i += 1) {
+        texContainer = (WebGPUTextureContainer *)storageTextures[i];
+
+        if (wgpuTextureGetFormat(texContainer->activeTexture->handle) != cmdBuf->computePipeline->bgl.storageFormats[i]) {
+            SDL_Log("Formats don't match!");
+        }
+
+        if (cmdBuf->computeReadOnlyStorageTextures[firstSlot + i] != texContainer->activeTexture->handle) {
+            WebGPU_INTERNAL_TrackTexture(cmdBuf, texContainer->activeTexture);
+
+            cmdBuf->computeReadOnlyStorageTextures[firstSlot + i] =
+                texContainer->activeTexture->handle;
+
+            cmdBuf->needComputeReadOnlyStorageTextureBind = true;
+        }
+    }
+}
+
+static void WebGPU_BindComputeStorageBuffers(
+    SDL_GPUCommandBuffer *commandBuffer,
+    Uint32 firstSlot,
+    SDL_GPUBuffer *const *storageBuffers,
+    Uint32 numBindings)
+{
+    WebGPUCommandBuffer *cmdBuf = (WebGPUCommandBuffer *)commandBuffer;
+    WebGPUBufferContainer *bufContainer;
+
+    for (Uint32 i = 0; i < numBindings; i += 1) {
+        bufContainer = (WebGPUBufferContainer *)storageBuffers[i];
+
+        if (cmdBuf->computeReadOnlyStorageBuffers[firstSlot + i] != bufContainer->activeBuffer->handle) {
+            WebGPU_INTERNAL_TrackBuffer(cmdBuf, bufContainer->activeBuffer);
+
+            cmdBuf->computeReadOnlyStorageBuffers[firstSlot + i] =
+                bufContainer->activeBuffer->handle;
+
+            cmdBuf->needComputeReadOnlyStorageBufferBind = true;
+        }
+    }
+}
 static void WebGPU_INTERNAL_BindComputeResources(WebGPUCommandBuffer *commandBuffer)
 {
     WebGPUComputePipeline *computePipeline = commandBuffer->computePipeline;
@@ -4064,8 +4175,8 @@ static void WebGPU_INTERNAL_BindComputeResources(WebGPUCommandBuffer *commandBuf
 
     // Check if any resources need binding
     bool needBind = commandBuffer->needComputeSamplerBind ||
-                    commandBuffer->needComputeTextureBind ||
-                    commandBuffer->needComputeBufferBind ||
+                    commandBuffer->needComputeReadOnlyStorageTextureBind ||
+                    commandBuffer->needComputeReadOnlyStorageBufferBind ||
                     commandBuffer->needComputeUniformBind;
 
     // Find or create cache entry for this pipeline
@@ -4123,8 +4234,8 @@ static void WebGPU_INTERNAL_BindComputeResources(WebGPUCommandBuffer *commandBuf
 
     // Clear resource binding flags
     commandBuffer->needComputeSamplerBind = false;
-    commandBuffer->needComputeTextureBind = false;
-    commandBuffer->needComputeBufferBind = false;
+    commandBuffer->needComputeReadOnlyStorageTextureBind = false;
+    commandBuffer->needComputeReadOnlyStorageBufferBind = false;
     commandBuffer->needComputeUniformBind = false;
 }
 
@@ -4248,6 +4359,46 @@ static void WebGPU_DrawIndexedPrimitives(
         firstIndex,
         vertexOffset,
         firstInstance);
+}
+
+static void WebGPU_DrawPrimitivesIndirect(
+    SDL_GPUCommandBuffer *commandBuffer,
+    SDL_GPUBuffer *buffer,
+    Uint32 offset,
+    Uint32 drawCount)
+{
+    if (commandBuffer == NULL) {
+        return;
+    }
+    WebGPUCommandBuffer *cmdBuf = (WebGPUCommandBuffer *)commandBuffer;
+    WebGPUBuffer *wgpuBuffer = ((WebGPUBufferContainer *)buffer)->activeBuffer;
+
+    WebGPU_INTERNAL_BindGraphicsResources(cmdBuf);
+    
+    Uint32 pitch = sizeof(SDL_GPUIndirectDrawCommand);
+    for (Uint32 i = 0; i < drawCount; i += 1) {
+        wgpuRenderPassEncoderDrawIndirect(cmdBuf->renderEncoder, wgpuBuffer->handle, offset + (i * pitch));
+    }
+}
+
+static void WebGPU_DrawIndexedPrimitivesIndirect(
+    SDL_GPUCommandBuffer *commandBuffer,
+    SDL_GPUBuffer *buffer,
+    Uint32 offset,
+    Uint32 drawCount)
+{
+    if (commandBuffer == NULL) {
+        return;
+    }
+    WebGPUCommandBuffer *cmdBuf = (WebGPUCommandBuffer *)commandBuffer;
+    WebGPUBuffer *wgpuBuffer = ((WebGPUBufferContainer *)buffer)->activeBuffer;
+
+    WebGPU_INTERNAL_BindGraphicsResources(cmdBuf);
+    
+    Uint32 pitch = sizeof(SDL_GPUIndexedIndirectDrawCommand);
+    for (Uint32 i = 0; i < drawCount; i += 1) {
+        wgpuRenderPassEncoderDrawIndexedIndirect(cmdBuf->renderEncoder, wgpuBuffer->handle, offset + (i * pitch));
+    }
 }
 
 static bool WebGPU_QueryFence(
@@ -4644,9 +4795,9 @@ static bool WebGPU_INTERNAL_AcquireSwapchainTexture(
 
     Uint32 frameIndex = windowData->frameCounter % MAX_FRAMES_IN_FLIGHT;
     SDL_LogDebug(SDL_LOG_CATEGORY_GPU, "Frame %u, fence index %u, inFlightFences: %p, signaled: %d, texture handle: %p",
-                windowData->frameCounter, frameIndex, windowData->inFlightFences[frameIndex],
-                windowData->inFlightFences[frameIndex] ? WebGPU_QueryFence((SDL_GPURenderer *)renderer, windowData->inFlightFences[frameIndex]) : -1,
-                windowData->texture.handle);
+                 windowData->frameCounter, frameIndex, windowData->inFlightFences[frameIndex],
+                 windowData->inFlightFences[frameIndex] ? WebGPU_QueryFence((SDL_GPURenderer *)renderer, windowData->inFlightFences[frameIndex]) : -1,
+                 windowData->texture.handle);
 
     if (windowData->inFlightFences[frameIndex]) {
         if (block) {
@@ -4889,12 +5040,12 @@ static void WebGPU_INTERNAL_CleanCommandBuffer(
     for (i = 0; i < MAX_STORAGE_TEXTURES_PER_STAGE; i += 1) {
         commandBuffer->vertexStorageTextures[i] = NULL;
         commandBuffer->fragmentStorageTextures[i] = NULL;
-        commandBuffer->computeReadOnlyTextures[i] = NULL;
+        commandBuffer->computeReadOnlyStorageTextures[i] = NULL;
     }
     for (i = 0; i < MAX_STORAGE_BUFFERS_PER_STAGE; i += 1) {
         commandBuffer->vertexStorageBuffers[i] = NULL;
         commandBuffer->fragmentStorageBuffers[i] = NULL;
-        commandBuffer->computeReadOnlyBuffers[i] = NULL;
+        commandBuffer->computeReadOnlyStorageBuffers[i] = NULL;
     }
     for (i = 0; i < MAX_COMPUTE_WRITE_TEXTURES; i += 1) {
         commandBuffer->computeReadWriteTextures[i] = NULL;
@@ -5701,6 +5852,8 @@ static SDL_GPUDevice *WebGPU_CreateDevice(bool debug, bool preferLowPower, SDL_P
     result->CreateSampler = WebGPU_CreateSampler;
     result->ReleaseSampler = WebGPU_ReleaseSampler;
     result->BindFragmentSamplers = WebGPU_BindFragmentSamplers;
+    result->BindFragmentStorageTextures = WebGPU_BindFragmentStorageTextures;
+    result->BindFragmentStorageBuffers = WebGPU_BindFragmentStorageBuffers;
 
     result->CreateTexture = WebGPU_CreateTexture;
     result->ReleaseTexture = WebGPU_ReleaseTexture;
@@ -5713,6 +5866,8 @@ static SDL_GPUDevice *WebGPU_CreateDevice(bool debug, bool preferLowPower, SDL_P
     result->DispatchCompute = WebGPU_DispatchCompute;
     result->BeginComputePass = WebGPU_BeginComputePass;
     result->EndComputePass = WebGPU_EndComputePass;
+    result->BindComputeStorageTextures = WebGPU_BindComputeStorageTextures;
+    result->BindComputeStorageBuffers = WebGPU_BindComputeStorageBuffers;
 
     result->CreateShader = WebGPU_CreateShader;
     result->ReleaseShader = WebGPU_ReleaseShader;
@@ -5721,8 +5876,12 @@ static SDL_GPUDevice *WebGPU_CreateDevice(bool debug, bool preferLowPower, SDL_P
     result->ReleaseGraphicsPipeline = WebGPU_ReleaseGraphicsPipeline;
     result->BindGraphicsPipeline = WebGPU_BindGraphicsPipeline;
     result->Blit = WebGPU_Blit;
+
     result->DrawPrimitives = WebGPU_DrawPrimitives;
+    result->DrawPrimitivesIndirect = WebGPU_DrawPrimitivesIndirect;
     result->DrawIndexedPrimitives = WebGPU_DrawIndexedPrimitives;
+    result->DrawIndexedPrimitivesIndirect = WebGPU_DrawIndexedPrimitivesIndirect;
+
     result->Wait = WebGPU_Wait;
     result->SetViewport = WebGPU_SetViewport;
     result->SetScissor = WebGPU_SetScissorRect;
