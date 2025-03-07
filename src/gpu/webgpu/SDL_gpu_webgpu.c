@@ -315,7 +315,6 @@ struct WebGPUCommandBuffer
     WGPUBuffer fragmentStorageBuffers[MAX_STORAGE_BUFFERS_PER_STAGE];
 
     WGPUTexture computeSamplerTextures[MAX_TEXTURE_SAMPLERS_PER_STAGE];
-    WGPUSampler computeSamplers[MAX_TEXTURE_SAMPLERS_PER_STAGE];
     WGPUTexture computeReadOnlyStorageTextures[MAX_TEXTURE_SAMPLERS_PER_STAGE];
     WGPUBuffer computeReadOnlyStorageBuffers[MAX_STORAGE_BUFFERS_PER_STAGE];
     WGPUTexture computeReadWriteTextures[MAX_COMPUTE_WRITE_TEXTURES];
@@ -3343,7 +3342,7 @@ static SDL_GPUComputePipeline *WebGPU_CreateComputePipeline(
 
         // Bind Group 0: Compute - Sampled Textures (TEXTURE then SAMPLER), Read Storage Textures, Read Storage Buffers
         Uint32 readOnlyTotal = pipeline->numReadonlyStorageTextures + pipeline->numReadonlyStorageBuffers;
-        Uint32 bindGroup0Total = (pipeline->numSamplers * 2) + readOnlyTotal;
+        Uint32 bindGroup0Total = pipeline->numSamplers + readOnlyTotal;
         WGPUBindGroupLayoutEntry *bg0Entries = SDL_calloc(bindGroup0Total, sizeof(WGPUBindGroupLayoutEntry));
         Uint32 bindingIndex = 0;
         Uint32 i;
@@ -3357,13 +3356,13 @@ static SDL_GPUComputePipeline *WebGPU_CreateComputePipeline(
             bg0Entries[bindingIndex].texture.viewDimension = pipelineBGL->sampleDimensions[i];
             bindingIndex++;
 
-            SDL_LogInfo(SDL_LOG_CATEGORY_GPU, "Texture Sample Type: %u, Dim: %u, Sampler Binding Type: %u", pipelineBGL->sampleTypes[i], pipelineBGL->sampleDimensions[i], pipelineBGL->sampleBindingType[i]);
+            // SDL_LogInfo(SDL_LOG_CATEGORY_GPU, "Texture Sample Type: %u, Dim: %u, Sampler Binding Type: %u", pipelineBGL->sampleTypes[i], pipelineBGL->sampleDimensions[i], pipelineBGL->sampleBindingType[i]);
 
-            // SAMPLER
-            bg0Entries[bindingIndex].binding = bindingIndex; // e.g., 1, 3, 5...
-            bg0Entries[bindingIndex].visibility = WGPUShaderStage_Compute;
-            bg0Entries[bindingIndex].sampler.type = pipelineBGL->sampleBindingType[i];
-            bindingIndex++;
+            // // SAMPLER
+            // bg0Entries[bindingIndex].binding = bindingIndex; // e.g., 1, 3, 5...
+            // bg0Entries[bindingIndex].visibility = WGPUShaderStage_Compute;
+            // bg0Entries[bindingIndex].sampler.type = pipelineBGL->sampleBindingType[i];
+            // bindingIndex++;
         }
 
         // Read only storage textures
@@ -3507,9 +3506,9 @@ static void WebGPU_INTERNAL_CreateComputeBindGroup(WebGPUCommandBuffer *cmdBuf, 
     WGPUTextureDimension dim;
     Uint32 layerCount;
 
-    // Bind Group 0: Compute - Sampled Textures (TEXTURE then SAMPLER), Read Storage Textures, Read Storage Buffers
+    // Bind Group 0: Compute - Sampled Textures (NO SAMPLER), Read Storage Textures, Read Storage Buffers
     Uint32 readOnlyTotal = pipeline->numReadonlyStorageTextures + pipeline->numReadonlyStorageBuffers;
-    Uint32 bindGroup0Total = (pipeline->numSamplers * 2) + readOnlyTotal;
+    Uint32 bindGroup0Total = pipeline->numSamplers + readOnlyTotal;
     WGPUBindGroupEntry *bg0Entries = SDL_calloc(bindGroup0Total, sizeof(WGPUBindGroupEntry));
     Uint32 bindingIndex = 0;
     Uint32 i;
@@ -3539,10 +3538,6 @@ static void WebGPU_INTERNAL_CreateComputeBindGroup(WebGPUCommandBuffer *cmdBuf, 
                 .mipLevelCount = wgpuTextureGetMipLevelCount(tex),
                 .dimension = viewDim,
             });
-        bindingIndex++;
-
-        bg0Entries[bindingIndex].binding = bindingIndex;
-        bg0Entries[bindingIndex].sampler = cmdBuf->computeSamplers[i];
         bindingIndex++;
     }
 
@@ -4112,6 +4107,34 @@ static void WebGPU_BindComputePipeline(
 
     SDL_LogDebug(SDL_LOG_CATEGORY_GPU, "Pipeline bound: %p, cache: %p, resourcesDirty: %d",
                  webgpuComputePipeline, cache, cache->resourcesDirty);
+}
+
+
+// We really only bind the texutures here since compute pipelines don't take samplers.
+static void WebGPU_BindComputeSamplers(
+    SDL_GPUCommandBuffer *commandBuffer,
+    Uint32 firstSlot,
+    const SDL_GPUTextureSamplerBinding *textureSamplerBindings,
+    Uint32 numBindings)
+{
+    WebGPUCommandBuffer *webgpuCommandBuffer = (WebGPUCommandBuffer *)commandBuffer;
+    WebGPUTextureContainer *textureContainer;
+
+    for (Uint32 i = 0; i < numBindings; i += 1) {
+        textureContainer = (WebGPUTextureContainer *)textureSamplerBindings[i].texture;
+
+        // No samplers allowed in WGPU Compute Pipelines, we make use of textureLoad() in shaders
+        if (webgpuCommandBuffer->computeSamplerTextures[firstSlot + i] != textureContainer->activeTexture->handle) {
+            WebGPU_INTERNAL_TrackTexture(
+                webgpuCommandBuffer,
+                textureContainer->activeTexture);
+
+            webgpuCommandBuffer->computeSamplerTextures[firstSlot + i] =
+                textureContainer->activeTexture->handle;
+
+            webgpuCommandBuffer->needComputeSamplerBind = true;
+        }
+    }
 }
 
 static void WebGPU_BindComputeStorageTextures(
@@ -5034,7 +5057,6 @@ static void WebGPU_INTERNAL_CleanCommandBuffer(
         commandBuffer->vertexTextures[i] = NULL;
         commandBuffer->fragmentSamplers[i] = NULL;
         commandBuffer->fragmentTextures[i] = NULL;
-        commandBuffer->computeSamplers[i] = NULL;
         commandBuffer->computeSamplerTextures[i] = NULL;
     }
     for (i = 0; i < MAX_STORAGE_TEXTURES_PER_STAGE; i += 1) {
@@ -5866,6 +5888,7 @@ static SDL_GPUDevice *WebGPU_CreateDevice(bool debug, bool preferLowPower, SDL_P
     result->DispatchCompute = WebGPU_DispatchCompute;
     result->BeginComputePass = WebGPU_BeginComputePass;
     result->EndComputePass = WebGPU_EndComputePass;
+    result->BindComputeSamplers = WebGPU_BindComputeSamplers;
     result->BindComputeStorageTextures = WebGPU_BindComputeStorageTextures;
     result->BindComputeStorageBuffers = WebGPU_BindComputeStorageBuffers;
 
