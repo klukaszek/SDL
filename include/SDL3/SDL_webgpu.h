@@ -23,23 +23,14 @@
  * # CategoryWebGPU
 **/
 
-/*
-NOTE: Some of the enum conversion functions are a nightmare to manage between the different flavours of webgpu.h
+// wgpu-native and Dawn install as `include/` and `lib/`. `include/` will contain a directory `webgpu/`
+#ifdef SDL_WEBGPU_DAWN
+#include "../../wgpu/include/dawn/dawn.h"
+#endif
 
-wgpu-native source code pulls it's header from here: https://github.com/webgpu-native/webgpu-headers/blob/main/webgpu.h
-however the header provided in the release version of the library: https://github.com/gfx-rs/wgpu-native/releases
-have some changes to the enum values that kind of screw everything up.
-
-Gotta wait until the header is finalized to get this fixed.
-
-webgpu.h from webgpu-headers SHOULD work for all backends, except for Emscripten and wgpu-native apparently!
-So as I suspected, Dawn would have been the best pick to work with like I had originally done before swapping to wgpu-native out of convenience.
-*/
-
-#ifndef __EMSCRIPTEN__
-// #include "../../wgpu/include/webgpu/webgpu.h"
+#ifdef SDL_WEBGPU_WGPU
 #include "../../wgpu/include/webgpu/wgpu.h"
-#endif // webgpu.h is provided by emscripten when using emcc with -sUSE_WEBGPU=1
+#endif
  
 #include <SDL3/SDL_stdinc.h>
 #include <SDL3/SDL_video.h>
