@@ -1545,6 +1545,7 @@ elseif(EMSCRIPTEN)
     set(SDL_VIDEO_DRIVER_EMSCRIPTEN 1)
     sdl_glob_sources("${SDL3_SOURCE_DIR}/src/video/emscripten/*.c")
     set(HAVE_SDL_VIDEO TRUE)
+
     #enable webgpu
     if(SDL_GPU AND SDL_WEBGPU)
       set(SDL_RENDER_WEBGPU ON)
@@ -1902,8 +1903,8 @@ elseif(UNIX AND NOT APPLE AND NOT RISCOS AND NOT HAIKU)
   if(SDL_WEBGPU)  # Native platform WebGPU handling
     set(SDL_VIDEO_WEBGPU 1)
 
-    # This should probably require a compilation flag with the path but for now
-    # SDL3/SDL_webgpu.h points to wgpu/ for the webgpu header.
+    # # This should probably require a compilation flag with the path but for now
+    # # SDL3/SDL_webgpu.h points to wgpu/ for the webgpu header.
     # The user must provide a wgpu library of their choice.
     set(SDL_WEBGPU_PATH "wgpu" CACHE PATH 
               "Path to WebGPU library (must contain include/ and lib/ directories)")
@@ -1919,11 +1920,17 @@ elseif(UNIX AND NOT APPLE AND NOT RISCOS AND NOT HAIKU)
         REQUIRED
     )
     find_library(WEBGPU_LIBRARY
-        NAMES wgpu_native
+        NAMES wgpu_native webgpu_dawn
         PATHS "${SDL_WEBGPU_PATH}/lib/"
         NO_DEFAULT_PATH
         REQUIRED
     )
+
+    if(WEBGPU_LIBRARY MATCHES "webgpu_dawn")
+      add_compile_definitions(SDL_WEBGPU_DAWN=1)
+    elseif(WEBGPU_LIBRARY MATCHES "wgpu_native")
+      add_compile_definitions(SDL_WEBGPU_WGPU=1)
+    endif()
 
     # Add to build system
     sdl_include_directories(PRIVATE SYSTEM "${WEBGPU_INCLUDE_DIR}")
@@ -2151,6 +2158,7 @@ elseif(WINDOWS)
         set(HAVE_RENDER_VULKAN TRUE)
       endif()
     endif()
+  
     if(SDL_WEBGPU)  # Native platform WebGPU handling
       set(SDL_VIDEO_WEBGPU 1)  
       # This should probably require a compilation flag with the path but for now
@@ -2169,11 +2177,16 @@ elseif(WINDOWS)
           REQUIRED
       )
       find_library(WEBGPU_LIBRARY
-          NAMES wgpu_native
+          NAMES wgpu_native webgpu_dawn
           PATHS "${SDL_WEBGPU_PATH}/lib/"
           NO_DEFAULT_PATH
           REQUIRED
       )
+      if(WEBGPU_LIBRARY MATCHES "webgpu_dawn")
+        add_compile_definitions(SDL_WEBGPU_DAWN=1)
+      elseif(WEBGPU_LIBRARY MATCHES "wgpu_native")
+        add_compile_definitions(SDL_WEBGPU_WGPU=1)
+      endif()
 
       # Add include directories
       sdl_include_directories(PRIVATE SYSTEM "${WEBGPU_INCLUDE_DIR}")
