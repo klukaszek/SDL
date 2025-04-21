@@ -476,7 +476,7 @@ typedef struct WebGPURenderer
     SDL_PixelFormat pixelFormat;
 
     WGPUAdapterInfo adapterInfo;
-    WGPUSupportedLimits physicalDeviceLimits;
+    // WGPUSupportedLimits physicalDeviceLimits;
 
     WGPUInstance instance;
     WGPUAdapter adapter;
@@ -524,7 +524,7 @@ typedef struct WebGPURenderer
     Uint32 blitPipelineCount;
     Uint32 blitPipelineCapacity;
 
-    Uint32 minUBOAlignment;
+    // Uint32 minUBOAlignment;
 
     // Deferred resource destruction
     WebGPUTexture **texturesToDestroy;
@@ -5162,7 +5162,7 @@ static bool WebGPU_INTERNAL_CreateWebGPUDevice(WebGPURenderer *renderer)
     renderer->queue = wgpuDeviceGetQueue(renderer->device);
 
     // Get the adapter limits
-    wgpuAdapterGetLimits(renderer->adapter, &renderer->physicalDeviceLimits);
+    // wgpuAdapterGetLimits(renderer->adapter, &renderer->physicalDeviceLimits);
     wgpuAdapterGetInfo(renderer->adapter, &renderer->adapterInfo);
 
     return true;
@@ -5193,7 +5193,7 @@ static SDL_GPUDevice *WebGPU_CreateDevice(bool debug, bool preferLowPower, SDL_P
             renderer->adapterInfo.description);
 
     // Keep track of the minimum uniform buffer alignment
-    renderer->minUBOAlignment = renderer->physicalDeviceLimits.limits.minUniformBufferOffsetAlignment;
+    // renderer->minUBOAlignment = renderer->physicalDeviceLimits.limits.minUniformBufferOffsetAlignment;
 
     // Initialize our SDL_GPUDevice
     result = (SDL_GPUDevice *)SDL_malloc(sizeof(SDL_GPUDevice));
